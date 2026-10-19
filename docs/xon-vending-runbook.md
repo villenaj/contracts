@@ -22,11 +22,14 @@ All three settle through one contract, `XonVendingMachine` (on Xode), and one re
 (`xon-relayer`, a separate repo) that watches all three sources and calls `settlePurchase` /
 `settleExternalPurchase` accordingly.
 
-Repos:
-- `contracts/` (sibling repo, `github.com/villenaj/contracts`) — `XonVendingMachine.sol`,
-  `EthUsdtGateway.sol`, Foundry tests. The scripts in `xode-blockchain/client/` read its build
-  output from `../../contracts/out/`, so it must be checked out next to `xode-blockchain/` and
-  built with `forge build`.
+Repos (all three checked out side by side in one parent folder; paths in this doc are relative
+to that folder):
+- `contracts/` (this repo, `github.com/villenaj/contracts`) — `XonVendingMachine.sol`,
+  `EthUsdtGateway.sol`, Foundry tests, and this runbook. The scripts in `xode-blockchain/client/`
+  read its build output from `../../contracts/out/`, so it must sit next to `xode-blockchain/` and
+  be built with `forge build`.
+- `xode-blockchain/` (sibling repo) — the Xode node, the zombienet local-network scripts, and the
+  `client/` deploy/test scripts
 - `xon-relayer/` (sibling repo) — the standalone relayer service
 
 ## 2. Prerequisites
@@ -44,7 +47,7 @@ Repos:
 ## 3. Build the contracts
 
 ```bash
-cd contracts        # the sibling repo, next to xode-blockchain/
+cd contracts
 forge build
 forge test        # 30 tests, should all pass - no network needed
 ```
@@ -62,6 +65,16 @@ The AssetHub parachain entry in `zombienet.toml` uses `chain = "asset-hub-westen
 preset predates AssetHub's `pallet-revive` rollout and doesn't include it, but its Westend preset
 does. The relay chain itself is still `rococo-local` — mixing relay/parachain chain flavors like
 this is unusual but works fine for local testing.
+
+The quickest way is one script that starts everything in order and waits for each piece to be
+ready before starting the next:
+
+```bash
+cd xode-blockchain/zombienet
+./start.sh --clean      # zombienet → both eth-rpc instances → anvil; add --no-anvil to skip anvil
+```
+
+Or start the pieces by hand:
 
 ```bash
 cd xode-blockchain/zombienet
