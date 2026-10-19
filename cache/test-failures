@@ -1,0 +1,1 @@
+{"version":1,"failures":[{"contract":"test/XonVendingMachine.t.sol:XonVendingMachineTest","test":"testFuzz_externalAvailable_neverExceedsTheCap"}]}
