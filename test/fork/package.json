@@ -1,0 +1,11 @@
+{
+  "name": "xon-contracts-fork-tests",
+  "private": true,
+  "type": "module",
+  "description": "Chopsticks fork tests for the vending contract against a real Xode runtime.",
+  "dependencies": {
+    "@acala-network/chopsticks": "1.5.2",
+    "@polkadot/api": "^16.5.1",
+    "ethers": "^6.15.0"
+  }
+}

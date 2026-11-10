@@ -7,6 +7,8 @@ import {IERC20} from "../interfaces/IERC20.sol";
 /// Xode in return, and records which Xode address (`xodeBeneficiary`) should receive it - there is
 /// no cross-chain callback here, so a separate relayer service watches `Deposited` events on this
 /// contract and calls `XonVendingMachine.settleExternalPurchase` on Xode to actually pay out.
+/// `depositForSwap` is the market-price variant: it emits `SwapDeposited` with the depositor's
+/// minimum, and the relayer pays it with `settleExternalSwap` (a DEX swap on Xode) or refunds it.
 ///
 /// This contract is a custodial escrow, not a bridge: USDT deposited here just sits in this
 /// contract's balance under `owner`'s control (via `withdraw`) until manually moved - there is no
@@ -28,6 +30,16 @@ contract EthUsdtGateway {
         address indexed xodeBeneficiary,
         uint256 usdtAmount,
         uint256 indexed depositNonce
+    );
+    /// A deposit to be paid at the Xode DEX's market price (`XonVendingMachine.settleExternalSwap`)
+    /// rather than the vending contract's fixed rate. `minXonOut` (18-decimal units) is the least
+    /// XON the depositor accepts; if the pool can't give that much, the relayer refunds them.
+    event SwapDeposited(
+        address indexed depositor,
+        address indexed xodeBeneficiary,
+        uint256 usdtAmount,
+        uint256 indexed depositNonce,
+        uint256 minXonOut
     );
     event Withdrawn(address indexed to, uint256 amount);
     event PausedSet(bool paused);
@@ -70,16 +82,35 @@ contract EthUsdtGateway {
     /// transfer (Ethereum USDT has a fee switch, currently off) can never be paid out above what
     /// the gateway really holds.
     function deposit(uint256 usdtAmount, address xodeBeneficiary) external whenNotPaused nonReentrant {
+        (uint256 received, uint256 nonce) = _pull(usdtAmount, xodeBeneficiary);
+        emit Deposited(msg.sender, xodeBeneficiary, received, nonce);
+    }
+
+    /// Like `deposit`, but asks to be paid at the Xode DEX's market price, receiving at least
+    /// `minXonOut` XON (18-decimal units, as Solidity sees native XON on Xode) or a refund. Set it
+    /// from a fresh quote minus your slippage tolerance. If USDT ever charges a transfer fee, the
+    /// swap is for what arrived, so a tight minimum may then be refunded instead.
+    function depositForSwap(uint256 usdtAmount, address xodeBeneficiary, uint256 minXonOut)
+        external
+        whenNotPaused
+        nonReentrant
+    {
+        if (minXonOut == 0) revert ZeroAmount();
+        (uint256 received, uint256 nonce) = _pull(usdtAmount, xodeBeneficiary);
+        emit SwapDeposited(msg.sender, xodeBeneficiary, received, nonce, minXonOut);
+    }
+
+    /// Takes `usdtAmount` from the caller; returns what actually arrived and the deposit's nonce.
+    function _pull(uint256 usdtAmount, address xodeBeneficiary) private returns (uint256 received, uint256 nonce) {
         if (xodeBeneficiary == address(0)) revert ZeroAddress();
         if (usdtAmount == 0) revert ZeroAmount();
 
         uint256 balanceBefore = usdt.balanceOf(address(this));
         _callUsdt(abi.encodeCall(IERC20.transferFrom, (msg.sender, address(this), usdtAmount)));
-        uint256 received = usdt.balanceOf(address(this)) - balanceBefore;
+        received = usdt.balanceOf(address(this)) - balanceBefore;
         if (received == 0) revert ZeroAmount();
 
-        uint256 nonce = depositNonce++;
-        emit Deposited(msg.sender, xodeBeneficiary, received, nonce);
+        nonce = depositNonce++;
     }
 
     function withdraw(address to, uint256 amount) external onlyOwner nonReentrant {

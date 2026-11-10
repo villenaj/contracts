@@ -169,4 +169,65 @@ contract EthUsdtGatewayTest is Test {
         vm.expectRevert(EthUsdtGateway.UsdtTransferFailed.selector);
         gateway.withdraw(owner, 1);
     }
+
+    // --- depositForSwap: market-price deposits ---------------------------------------------------
+
+    function test_depositForSwap_emitsTheMinimum() public {
+        vm.startPrank(depositor);
+        require(usdt.approve(address(gateway), 20_000_000));
+        vm.expectEmit(true, true, true, true);
+        emit EthUsdtGateway.SwapDeposited(depositor, xodeBeneficiary, 20_000_000, 0, 3.8 ether);
+        gateway.depositForSwap(20_000_000, xodeBeneficiary, 3.8 ether);
+        vm.stopPrank();
+
+        assertEq(usdt.balanceOf(address(gateway)), 20_000_000);
+        assertEq(gateway.depositNonce(), 1);
+    }
+
+    function test_depositForSwap_sharesTheNonceWithDeposit() public {
+        vm.startPrank(depositor);
+        require(usdt.approve(address(gateway), 30_000_000));
+        gateway.deposit(10_000_000, xodeBeneficiary);
+        vm.expectEmit(true, true, true, true);
+        emit EthUsdtGateway.SwapDeposited(depositor, xodeBeneficiary, 20_000_000, 1, 1 ether);
+        gateway.depositForSwap(20_000_000, xodeBeneficiary, 1 ether);
+        vm.stopPrank();
+        assertEq(gateway.depositNonce(), 2);
+    }
+
+    function test_depositForSwap_requiresAMinimum() public {
+        vm.startPrank(depositor);
+        require(usdt.approve(address(gateway), 10_000_000));
+        vm.expectRevert(EthUsdtGateway.ZeroAmount.selector);
+        gateway.depositForSwap(10_000_000, xodeBeneficiary, 0);
+        vm.stopPrank();
+    }
+
+    function test_depositForSwap_keepsDepositsGuards() public {
+        vm.startPrank(depositor);
+        require(usdt.approve(address(gateway), 10_000_000));
+        vm.expectRevert(EthUsdtGateway.ZeroAddress.selector);
+        gateway.depositForSwap(10_000_000, address(0), 1 ether);
+        vm.expectRevert(EthUsdtGateway.ZeroAmount.selector);
+        gateway.depositForSwap(0, xodeBeneficiary, 1 ether);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        gateway.setPaused(true);
+        vm.prank(depositor);
+        vm.expectRevert(EthUsdtGateway.IsPaused.selector);
+        gateway.depositForSwap(10_000_000, xodeBeneficiary, 1 ether);
+    }
+
+    function test_depositForSwap_recordsWhatArrived_whenUsdtChargesAFee() public {
+        (EthUsdtGateway tetherGateway, TetherLikeUsdt tether) = _tetherGateway();
+        tether.setParams(10, 1_000_000);
+
+        vm.startPrank(depositor);
+        tether.approve(address(tetherGateway), 20_000_000);
+        vm.expectEmit(true, true, true, true);
+        emit EthUsdtGateway.SwapDeposited(depositor, xodeBeneficiary, 19_980_000, 0, 1 ether);
+        tetherGateway.depositForSwap(20_000_000, xodeBeneficiary, 1 ether);
+        vm.stopPrank();
+    }
 }

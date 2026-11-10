@@ -1,0 +1,15 @@
+# Chopsticks fork of Xode mainnet with the spec 17 runtime (XCM AssetExchanger) swapped in.
+# Run from the contracts repo root; the Wasm path assumes xode-blockchain is checked out next to it.
+endpoint: wss://polkadot-rpcnode.xode.net
+port: 8001
+mock-signature-host: true
+wasm-override: ../xode-blockchain/target/release/wbuild/xode-runtime/xode_runtime.compact.compressed.wasm
+import-storage:
+  System:
+    Account:
+      # //Alice: XON for fees and storage deposits
+      - [[15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5], { providers: 1, data: { free: '1000000000000000' } }]
+  Assets:
+    Account:
+      # //Alice: 100 USDT (asset 1984), enough to fund the test's inventory
+      - [[1984, 15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5], { balance: 100000000 }]

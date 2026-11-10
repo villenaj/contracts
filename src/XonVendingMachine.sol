@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "./interfaces/IERC20.sol";
+import {IXcm, XcmSwap} from "./XcmSwap.sol";
 
 /// @notice Holds a native-XON reserve the owner pre-funds, and pays it out at a fixed,
 /// owner-set rate to anyone who pays USDT (an ERC20 precompile over a pallet-assets
@@ -34,6 +35,15 @@ import {IERC20} from "./interfaces/IERC20.sol";
 /// relayer key and the custody it implies (the AssetHub/Ethereum gateways' owner keys) secured
 /// accordingly.
 ///
+/// `settleExternalSwap` is the market-price version of `settleExternalPurchase`: instead of paying
+/// XON from the reserve at `rate`, it spends the same amount of USDT from this contract's own
+/// USDT inventory on Xode, swaps it for XON through Xode's DEX pool (via the XCM precompile and
+/// the runtime's XCM `AssetExchanger`), and pays the buyer whatever the swap returned, provided it
+/// is at least the buyer's `minXonOut`. It's bounded by the same external limits and trusts the
+/// relayer the same way, but there's no XON reserve to drain at a stale rate, and the price is the
+/// pool's. It only ever spends `accountedUsdt` - USDT already paid for by completed purchases or
+/// added with `fundUsdtInventory` - never a native deposit that hasn't been settled yet.
+///
 /// `rate` is XON paid out per 1 whole USDT, expressed the way Solidity sees native value on
 /// Xode: `pallet_revive`'s `NativeToEthRatio` (1e18/1e12 = 1_000_000) rescales the chain's
 /// 12-decimal native `Balance` up to standard 18-decimal EVM/"ether" units at the call boundary,
@@ -56,6 +66,9 @@ contract XonVendingMachine {
     uint256 private _externalAllowanceAt;
 
     uint256 private constant USDT_SCALE = 1e6;
+    /// `pallet_revive`'s `NativeToEthRatio` on Xode: 1 planck (XON's 12-decimal native unit) is
+    /// 1e6 of the 18-decimal units Solidity sees.
+    uint256 private constant NATIVE_TO_ETH_RATIO = 1e6;
     uint256 private constant EXTERNAL_WINDOW = 1 days;
     uint256 private _locked;
 
@@ -79,6 +92,14 @@ contract XonVendingMachine {
     event RelayerUpdated(address indexed previousRelayer, address indexed newRelayer);
     event ExternalLimitsSet(uint256 maxPerDeposit, uint256 maxPerDay);
     event Deposited(address indexed from, uint256 amount);
+    event ExternalSwapSettled(
+        address indexed buyer,
+        string sourceChain,
+        bytes32 indexed depositId,
+        uint256 usdtIn,
+        uint256 xonOut
+    );
+    event UsdtInventoryFunded(address indexed from, uint256 amount);
 
     error NotOwner();
     error NotRelayer();
@@ -94,6 +115,8 @@ contract XonVendingMachine {
     error AlreadyExternallySettled();
     error OverExternalDepositLimit();
     error OverExternalDailyLimit();
+    error InsufficientUsdtInventory();
+    error SlippageExceeded();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -212,6 +235,65 @@ contract XonVendingMachine {
         if (!sent) revert XonTransferFailed();
 
         emit ExternalSettled(buyer, sourceChain, depositId, usdtAmount, xonOut);
+    }
+
+    /// Like `settleExternalPurchase`, but at the DEX's market price instead of `rate`: swaps
+    /// `usdtAmount` of this contract's USDT inventory for XON through Xode's pool and pays the buyer
+    /// everything the swap returned. `minXonOut` (18-decimal units, like `rate`) is the least the
+    /// buyer accepts; it should come from the buyer's own deposit, not the relayer. If the pool
+    /// can't give that much, the whole call reverts and nothing is marked settled, so the deposit
+    /// can be retried or refunded. Same external limits and relayer trust as
+    /// `settleExternalPurchase`; the two share `externalSettledDeposits`, so a deposit can only ever
+    /// be paid one way.
+    function settleExternalSwap(
+        address buyer,
+        uint256 usdtAmount,
+        uint256 minXonOut,
+        string calldata sourceChain,
+        bytes32 depositId
+    ) external onlyRelayer whenNotPaused nonReentrant {
+        if (buyer == address(0)) revert ZeroAddress();
+        if (usdtAmount == 0 || minXonOut == 0) revert ZeroAmount();
+        if (externalSettledDeposits[depositId]) revert AlreadyExternallySettled();
+        if (usdtAmount > maxExternalPerDeposit) revert OverExternalDepositLimit();
+        uint256 available = externalAvailable();
+        if (usdtAmount > available) revert OverExternalDailyLimit();
+        if (usdtAmount > accountedUsdt) revert InsufficientUsdtInventory();
+
+        externalSettledDeposits[depositId] = true;
+        _externalAllowance = available - usdtAmount;
+        _externalAllowanceAt = block.timestamp;
+        accountedUsdt -= usdtAmount;
+
+        uint256 xonOut = _swapUsdtForXon(usdtAmount, minXonOut);
+        (bool sent, ) = buyer.call{value: xonOut}("");
+        if (!sent) revert XonTransferFailed();
+
+        emit ExternalSwapSettled(buyer, sourceChain, depositId, usdtAmount, xonOut);
+    }
+
+    /// Swaps `usdtAmount` of this contract's USDT for at least `minXonOut` XON on Xode's DEX. The
+    /// XCM program deposits the XON into this contract's own account; returns what arrived.
+    function _swapUsdtForXon(uint256 usdtAmount, uint256 minXonOut) private returns (uint256 xonOut) {
+        uint256 balanceBefore = address(this).balance;
+        uint256 minPlanck = (minXonOut + NATIVE_TO_ETH_RATIO - 1) / NATIVE_TO_ETH_RATIO;
+        bytes memory message =
+            XcmSwap.swapUsdtForXon(usdtAmount, minPlanck, XcmSwap.contractAccount(address(this)));
+        IXcm xcm = IXcm(XcmSwap.XCM_PRECOMPILE);
+        xcm.execute(message, xcm.weighMessage(message));
+        xonOut = address(this).balance - balanceBefore;
+        // The XCM program already enforces the minimum; this guards against it paying elsewhere.
+        if (xonOut < minXonOut) revert SlippageExceeded();
+    }
+
+    /// Adds USDT to the inventory `settleExternalSwap` spends from (needs a prior
+    /// `usdt.approve(address(this), amount)`). A plain transfer would look like a native purchase
+    /// waiting to be settled, so inventory goes through here and is counted in `accountedUsdt`.
+    function fundUsdtInventory(uint256 amount) external onlyOwner nonReentrant {
+        if (amount == 0) revert ZeroAmount();
+        if (!usdt.transferFrom(msg.sender, address(this), amount)) revert UsdtTransferFailed();
+        accountedUsdt += amount;
+        emit UsdtInventoryFunded(msg.sender, amount);
     }
 
     /// Amount of XON `usdtAmount` USDT would currently buy, at zero cost/side effects.
