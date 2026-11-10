@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Custodial} from "../src/Custodial.sol";
 import {XonVendingMachine} from "../src/XonVendingMachine.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 
@@ -21,7 +22,7 @@ contract XonVendingMachineTest is Test {
 
     function setUp() public {
         usdt = new MockUSDT();
-        vending = new XonVendingMachine(address(usdt), owner, RATE, relayer);
+        vending = new XonVendingMachine(address(usdt), owner, RATE, relayer, owner, owner);
 
         vm.deal(owner, 1_000 * ONE_XON);
         vm.prank(owner);
@@ -64,7 +65,7 @@ contract XonVendingMachineTest is Test {
 
     function test_buy_revertsWhenReserveInsufficient() public {
         vm.prank(owner);
-        vending.withdrawXon(payable(owner), 100 * ONE_XON);
+        vending.withdrawXon(100 * ONE_XON);
 
         vm.startPrank(buyer);
         require(usdt.approve(address(vending), 10_000_000));
@@ -79,14 +80,14 @@ contract XonVendingMachineTest is Test {
 
         vm.startPrank(buyer);
         require(usdt.approve(address(vending), 10_000_000));
-        vm.expectRevert(XonVendingMachine.IsPaused.selector);
+        vm.expectRevert(Custodial.IsPaused.selector);
         vending.buy(10_000_000);
         vm.stopPrank();
     }
 
     function test_onlyOwner_canSetRate() public {
         vm.prank(buyer);
-        vm.expectRevert(XonVendingMachine.NotOwner.selector);
+        vm.expectRevert(Custodial.NotOwner.selector);
         vending.setRate(1);
 
         vm.prank(owner);
@@ -96,12 +97,12 @@ contract XonVendingMachineTest is Test {
 
     function test_onlyOwner_canWithdrawXon() public {
         vm.prank(buyer);
-        vm.expectRevert(XonVendingMachine.NotOwner.selector);
-        vending.withdrawXon(payable(buyer), 1 * ONE_XON);
+        vm.expectRevert(Custodial.NotOwner.selector);
+        vending.withdrawXon(1 * ONE_XON);
 
         uint256 before = owner.balance;
         vm.prank(owner);
-        vending.withdrawXon(payable(owner), 1 * ONE_XON);
+        vending.withdrawXon(1 * ONE_XON);
         assertEq(owner.balance, before + 1 * ONE_XON);
     }
 
@@ -112,11 +113,11 @@ contract XonVendingMachineTest is Test {
         vm.stopPrank();
 
         vm.prank(buyer);
-        vm.expectRevert(XonVendingMachine.NotOwner.selector);
-        vending.withdrawUsdt(buyer, 10_000_000);
+        vm.expectRevert(Custodial.NotOwner.selector);
+        vending.withdrawUsdt(10_000_000);
 
         vm.prank(owner);
-        vending.withdrawUsdt(owner, 10_000_000);
+        vending.withdrawUsdt(10_000_000);
         assertEq(usdt.balanceOf(owner), 10_000_000);
         assertEq(vending.accountedUsdt(), 0);
     }
@@ -125,24 +126,30 @@ contract XonVendingMachineTest is Test {
         address newOwner = makeAddr("newOwner");
 
         vm.prank(buyer);
-        vm.expectRevert(XonVendingMachine.NotOwner.selector);
+        vm.expectRevert(Custodial.NotOwner.selector);
         vending.transferOwnership(newOwner);
 
         vm.prank(owner);
         vending.transferOwnership(newOwner);
+        assertEq(vending.owner(), owner, "nominating doesn't hand over ownership");
+        assertEq(vending.pendingOwner(), newOwner);
+
+        vm.prank(newOwner);
+        vending.acceptOwnership();
         assertEq(vending.owner(), newOwner);
+        assertEq(vending.pendingOwner(), address(0));
 
         vm.prank(owner);
-        vm.expectRevert(XonVendingMachine.NotOwner.selector);
+        vm.expectRevert(Custodial.NotOwner.selector);
         vending.setRate(2);
     }
 
     function test_constructor_rejectsZeroAddresses() public {
-        vm.expectRevert(XonVendingMachine.ZeroAddress.selector);
-        new XonVendingMachine(address(0), owner, RATE, relayer);
+        vm.expectRevert(Custodial.ZeroAddress.selector);
+        new XonVendingMachine(address(0), owner, RATE, relayer, owner, owner);
 
-        vm.expectRevert(XonVendingMachine.ZeroAddress.selector);
-        new XonVendingMachine(address(usdt), address(0), RATE, relayer);
+        vm.expectRevert(Custodial.ZeroAddress.selector);
+        new XonVendingMachine(address(usdt), address(0), RATE, relayer, address(0), address(0));
     }
 
     // --- settlePurchase (push/relayer path) ---
@@ -220,7 +227,7 @@ contract XonVendingMachineTest is Test {
         vending.setPaused(true);
 
         vm.prank(relayer);
-        vm.expectRevert(XonVendingMachine.IsPaused.selector);
+        vm.expectRevert(Custodial.IsPaused.selector);
         vending.settlePurchase(buyer, 10_000_000, depositTxHash);
     }
 
@@ -228,7 +235,7 @@ contract XonVendingMachineTest is Test {
         address newRelayer = makeAddr("newRelayer");
 
         vm.prank(buyer);
-        vm.expectRevert(XonVendingMachine.NotOwner.selector);
+        vm.expectRevert(Custodial.NotOwner.selector);
         vending.setRelayer(newRelayer);
 
         vm.prank(owner);
@@ -250,7 +257,7 @@ contract XonVendingMachineTest is Test {
         vending.settlePurchase(buyer, 10_000_000, firstDeposit);
 
         vm.prank(owner);
-        vending.withdrawUsdt(owner, 10_000_000);
+        vending.withdrawUsdt(10_000_000);
         assertEq(vending.accountedUsdt(), 0);
 
         usdt.mint(buyer, 5_000_000);
@@ -304,7 +311,7 @@ contract XonVendingMachineTest is Test {
         vending.setPaused(true);
 
         vm.prank(relayer);
-        vm.expectRevert(XonVendingMachine.IsPaused.selector);
+        vm.expectRevert(Custodial.IsPaused.selector);
         vending.settleExternalPurchase(buyer, 10_000_000, "ethereum", keccak256("x"));
     }
 
@@ -344,7 +351,7 @@ contract XonVendingMachineTest is Test {
     }
 
     function test_externalLimits_startClosed() public {
-        XonVendingMachine fresh = new XonVendingMachine(address(usdt), owner, RATE, relayer);
+        XonVendingMachine fresh = new XonVendingMachine(address(usdt), owner, RATE, relayer, owner, owner);
         vm.deal(address(fresh), 100 * ONE_XON);
         assertEq(fresh.externalAvailable(), 0);
 
@@ -411,7 +418,7 @@ contract XonVendingMachineTest is Test {
 
     function test_setExternalLimits_onlyOwner_andEmits() public {
         vm.prank(relayer);
-        vm.expectRevert(XonVendingMachine.NotOwner.selector);
+        vm.expectRevert(Custodial.NotOwner.selector);
         vending.setExternalLimits(1, 1);
 
         vm.expectEmit(false, false, false, true);

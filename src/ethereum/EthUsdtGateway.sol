@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "../interfaces/IERC20.sol";
+import {Custodial} from "../Custodial.sol";
 
 /// @notice Deployed on Ethereum (not Xode). Accepts real USDT from a depositor who wants XON on
 /// Xode in return, and records which Xode address (`xodeBeneficiary`) should receive it - there is
@@ -10,18 +11,20 @@ import {IERC20} from "../interfaces/IERC20.sol";
 /// `depositForSwap` is the market-price variant: it emits `SwapDeposited` with the depositor's
 /// minimum, and the relayer pays it with `settleExternalSwap` (a DEX swap on Xode) or refunds it.
 ///
-/// This contract is a custodial escrow, not a bridge: USDT deposited here just sits in this
-/// contract's balance under `owner`'s control (via `withdraw`) until manually moved - there is no
-/// on-chain mechanism connecting Ethereum and Xode (Xode has no live Snowbridge connection as of
-/// writing). The XON payout on Xode is entirely a promise kept by whoever runs the relayer and
-/// controls `owner`/`relayer` here and the corresponding `relayer` role on `XonVendingMachine` -
-/// securing those keys (and this contract's `owner` key, which can drain the whole USDT balance)
-/// is the actual security boundary of this leg, not this contract's code.
-contract EthUsdtGateway {
+/// This contract is a custodial escrow, not a bridge: USDT deposited here sits in this contract's
+/// balance until the owner moves it - there is no on-chain mechanism connecting Ethereum and Xode
+/// (Xode has no live Snowbridge connection as of writing). The XON payout on Xode is a promise kept
+/// by whoever runs the relayer. What bounds a compromised owner (the custody rules in `Custodial`):
+///  - `withdraw` only ever pays the `treasury` (meant to be a separate, cold multisig); changing the
+///    treasury waits `TREASURY_DELAY`, during which the `guardian` can cancel it and pause.
+///  - `refund` only pays a deposit back to the account that made it, once (deposits are recorded).
+///  - Ownership moves in two steps, so a wrong owner address can never take the gateway.
+contract EthUsdtGateway is Custodial {
     IERC20 public immutable usdt;
-    address public owner;
-    bool public paused;
     uint256 public depositNonce;
+
+    /// keccak256(abi.encode(depositor, usdtAmount)) per deposit nonce, until it's refunded.
+    mapping(uint256 => bytes32) public depositRecords;
 
     uint256 private _locked;
 
@@ -33,7 +36,7 @@ contract EthUsdtGateway {
     );
     /// A deposit to be paid at the Xode DEX's market price (`XonVendingMachine.settleExternalSwap`)
     /// rather than the vending contract's fixed rate. `minXonOut` (18-decimal units) is the least
-    /// XON the depositor accepts; if the pool can't give that much, the relayer refunds them.
+    /// XON the depositor accepts; if the pool can't give that much, it's refunded.
     event SwapDeposited(
         address indexed depositor,
         address indexed xodeBeneficiary,
@@ -42,25 +45,12 @@ contract EthUsdtGateway {
         uint256 minXonOut
     );
     event Withdrawn(address indexed to, uint256 amount);
-    event PausedSet(bool paused);
-    event OwnerTransferred(address indexed previousOwner, address indexed newOwner);
+    event Refunded(uint256 indexed depositNonce, address indexed depositor, uint256 amount);
 
-    error NotOwner();
-    error IsPaused();
-    error ZeroAddress();
     error ZeroAmount();
     error UsdtTransferFailed();
     error Reentrant();
-
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
-        _;
-    }
-
-    modifier whenNotPaused() {
-        if (paused) revert IsPaused();
-        _;
-    }
+    error UnknownDeposit();
 
     modifier nonReentrant() {
         if (_locked == 1) revert Reentrant();
@@ -69,10 +59,13 @@ contract EthUsdtGateway {
         _locked = 0;
     }
 
-    constructor(address usdtToken, address owner_) {
-        if (usdtToken == address(0) || owner_ == address(0)) revert ZeroAddress();
+    /// `treasury_` is where withdrawals go (a cold multisig in production) and `guardian_` the key or
+    /// multisig that can pause and veto treasury changes - both may start as `owner_` in development.
+    constructor(address usdtToken, address owner_, address treasury_, address guardian_)
+        Custodial(owner_, treasury_, guardian_)
+    {
+        if (usdtToken == address(0)) revert ZeroAddress();
         usdt = IERC20(usdtToken);
-        owner = owner_;
     }
 
     /// Deposits `usdtAmount` USDT (requires a prior `usdt.approve(address(this), usdtAmount)`)
@@ -111,23 +104,25 @@ contract EthUsdtGateway {
         if (received == 0) revert ZeroAmount();
 
         nonce = depositNonce++;
+        depositRecords[nonce] = keccak256(abi.encode(msg.sender, received));
     }
 
-    function withdraw(address to, uint256 amount) external onlyOwner nonReentrant {
-        if (to == address(0)) revert ZeroAddress();
-        _callUsdt(abi.encodeCall(IERC20.transfer, (to, amount)));
-        emit Withdrawn(to, amount);
+    /// Moves custodied USDT to the treasury - the only place it can go besides a refund.
+    function withdraw(uint256 amount) external onlyOwner nonReentrant {
+        if (amount == 0) revert ZeroAmount();
+        _callUsdt(abi.encodeCall(IERC20.transfer, (treasury, amount)));
+        emit Withdrawn(treasury, amount);
     }
 
-    function setPaused(bool paused_) external onlyOwner {
-        paused = paused_;
-        emit PausedSet(paused_);
-    }
-
-    function transferOwnership(address newOwner) external onlyOwner {
-        if (newOwner == address(0)) revert ZeroAddress();
-        emit OwnerTransferred(owner, newOwner);
-        owner = newOwner;
+    /// Pays deposit `nonce` back to the account that made it, in full and only once - for a deposit
+    /// that can't be paid out on Xode (e.g. a market-price minimum the pool couldn't meet).
+    /// `depositor` and `usdtAmount` must match the deposit's event; they're checked against the record.
+    function refund(uint256 nonce, address depositor, uint256 usdtAmount) external onlyOwner nonReentrant {
+        bytes32 record = depositRecords[nonce];
+        if (record == bytes32(0) || record != keccak256(abi.encode(depositor, usdtAmount))) revert UnknownDeposit();
+        delete depositRecords[nonce];
+        _callUsdt(abi.encodeCall(IERC20.transfer, (depositor, usdtAmount)));
+        emit Refunded(nonce, depositor, usdtAmount);
     }
 
     /// Calls `transfer`/`transferFrom` on USDT, accepting tokens that return nothing. Ethereum's

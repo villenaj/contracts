@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IXcm, XcmSwap} from "./XcmSwap.sol";
+import {Custodial} from "./Custodial.sol";
 
 /// @notice Holds a native-XON reserve the owner pre-funds, and pays it out at a fixed,
 /// owner-set rate to anyone who pays USDT (an ERC20 precompile over a pallet-assets
@@ -56,12 +57,10 @@ import {IXcm, XcmSwap} from "./XcmSwap.sol";
 /// so `msg.value`/`.balance`/`.call{value:}` all use 18 decimals here regardless of the chain's
 /// underlying native decimals. USDT (a 6-decimal pallet-assets token) is unaffected by that
 /// ratio - its precompile reports raw pallet-assets balances. E.g. rate = 5 ether pays 5 XON/USDT.
-contract XonVendingMachine {
+contract XonVendingMachine is Custodial {
     IERC20 public immutable usdt;
-    address public owner;
     address public relayer;
     uint256 public rate;
-    bool public paused;
     uint256 public accountedUsdt;
 
     /// Limits on `settleExternalPurchase`, in raw USDT units - see the contract docs.
@@ -107,10 +106,8 @@ contract XonVendingMachine {
         uint256 xonOut
     );
     event RateUpdated(uint256 oldRate, uint256 newRate);
-    event PausedSet(bool paused);
     event XonWithdrawn(address indexed to, uint256 amount);
     event UsdtWithdrawn(address indexed to, uint256 amount);
-    event OwnerTransferred(address indexed previousOwner, address indexed newOwner);
     event RelayerUpdated(address indexed previousRelayer, address indexed newRelayer);
     event ExternalLimitsSet(uint256 maxPerDeposit, uint256 maxPerDay);
     event NativeLimitsSet(uint256 maxPerPurchase, uint256 maxPerDay);
@@ -125,10 +122,7 @@ contract XonVendingMachine {
     );
     event UsdtInventoryFunded(address indexed from, uint256 amount);
 
-    error NotOwner();
     error NotRelayer();
-    error IsPaused();
-    error ZeroAddress();
     error ZeroAmount();
     error InsufficientReserve();
     error UsdtTransferFailed();
@@ -147,18 +141,8 @@ contract XonVendingMachine {
     error InsufficientUsdtInventory();
     error SlippageExceeded();
 
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
-        _;
-    }
-
     modifier onlyRelayer() {
         if (msg.sender != relayer) revert NotRelayer();
-        _;
-    }
-
-    modifier whenNotPaused() {
-        if (paused) revert IsPaused();
         _;
     }
 
@@ -169,10 +153,14 @@ contract XonVendingMachine {
         _locked = 0;
     }
 
-    constructor(address usdtToken, address owner_, uint256 initialRate, address relayer_) {
-        if (usdtToken == address(0) || owner_ == address(0)) revert ZeroAddress();
+    /// `treasury_` is the only place the owner can withdraw XON / USDT to (a cold multisig in
+    /// production) and `guardian_` the key or multisig that can pause and veto treasury changes -
+    /// see `Custodial`. Both may start as `owner_` in development.
+    constructor(address usdtToken, address owner_, uint256 initialRate, address relayer_, address treasury_, address guardian_)
+        Custodial(owner_, treasury_, guardian_)
+    {
+        if (usdtToken == address(0)) revert ZeroAddress();
         usdt = IERC20(usdtToken);
-        owner = owner_;
         rate = initialRate;
         relayer = relayer_;
     }
@@ -418,32 +406,20 @@ contract XonVendingMachine {
         relayer = newRelayer;
     }
 
-    function setPaused(bool paused_) external onlyOwner {
-        paused = paused_;
-        emit PausedSet(paused_);
-    }
-
-    function withdrawXon(address payable to, uint256 amount) external onlyOwner nonReentrant {
-        if (to == address(0)) revert ZeroAddress();
+    /// Moves XON from the reserve to the treasury - the only place it can go.
+    function withdrawXon(uint256 amount) external onlyOwner nonReentrant {
         if (address(this).balance < amount) revert InsufficientReserve();
-        (bool sent, ) = to.call{value: amount}("");
+        (bool sent, ) = payable(treasury).call{value: amount}("");
         if (!sent) revert XonTransferFailed();
-        emit XonWithdrawn(to, amount);
+        emit XonWithdrawn(treasury, amount);
     }
 
-    /// Rescues USDT sitting in the contract (e.g. surplus beyond what buyers paid for).
-    /// Draws down `accountedUsdt` first so `settlePurchase`'s balance check stays meaningful
-    /// after a withdrawal instead of being permanently blocked by funds that already left.
-    function withdrawUsdt(address to, uint256 amount) external onlyOwner nonReentrant {
-        if (to == address(0)) revert ZeroAddress();
+    /// Moves USDT to the treasury (e.g. inventory or proceeds). Draws down `accountedUsdt` first so
+    /// `settlePurchase`'s balance check stays meaningful after a withdrawal instead of being
+    /// permanently blocked by funds that already left.
+    function withdrawUsdt(uint256 amount) external onlyOwner nonReentrant {
         accountedUsdt -= amount > accountedUsdt ? accountedUsdt : amount;
-        if (!usdt.transfer(to, amount)) revert UsdtTransferFailed();
-        emit UsdtWithdrawn(to, amount);
-    }
-
-    function transferOwnership(address newOwner) external onlyOwner {
-        if (newOwner == address(0)) revert ZeroAddress();
-        emit OwnerTransferred(owner, newOwner);
-        owner = newOwner;
+        if (!usdt.transfer(treasury, amount)) revert UsdtTransferFailed();
+        emit UsdtWithdrawn(treasury, amount);
     }
 }

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Custodial} from "../src/Custodial.sol";
 import {XonVendingMachine} from "../src/XonVendingMachine.sol";
 import {IXcm, XcmSwap} from "../src/XcmSwap.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
@@ -61,7 +62,7 @@ contract XonVendingMachineSwapTest is Test {
 
     function setUp() public {
         usdt = new BurnableMockUSDT();
-        vending = new XonVendingMachine(address(usdt), owner, RATE, relayer);
+        vending = new XonVendingMachine(address(usdt), owner, RATE, relayer, owner, owner);
 
         vm.etch(XcmSwap.XCM_PRECOMPILE, address(new MockXcmPrecompile()).code);
         xcm = MockXcmPrecompile(XcmSwap.XCM_PRECOMPILE);
@@ -174,7 +175,7 @@ contract XonVendingMachineSwapTest is Test {
         usdt.mint(relayer, ONE_USDT);
         vm.startPrank(relayer);
         usdt.approve(address(vending), ONE_USDT);
-        vm.expectRevert(XonVendingMachine.NotOwner.selector);
+        vm.expectRevert(Custodial.NotOwner.selector);
         vending.fundUsdtInventory(ONE_USDT);
         vm.stopPrank();
     }
@@ -197,7 +198,7 @@ contract XonVendingMachineSwapTest is Test {
         vm.prank(owner);
         vending.setPaused(true);
         vm.prank(relayer);
-        vm.expectRevert(XonVendingMachine.IsPaused.selector);
+        vm.expectRevert(Custodial.IsPaused.selector);
         vending.settleExternalSwap(buyer, 2 * ONE_USDT, 1 ether, "ethereum", DEPOSIT);
     }
 
@@ -207,7 +208,7 @@ contract XonVendingMachineSwapTest is Test {
         vending.settleExternalSwap(buyer, 0, 1 ether, "ethereum", DEPOSIT);
         vm.expectRevert(XonVendingMachine.ZeroAmount.selector);
         vending.settleExternalSwap(buyer, 2 * ONE_USDT, 0, "ethereum", DEPOSIT);
-        vm.expectRevert(XonVendingMachine.ZeroAddress.selector);
+        vm.expectRevert(Custodial.ZeroAddress.selector);
         vending.settleExternalSwap(address(0), 2 * ONE_USDT, 1 ether, "ethereum", DEPOSIT);
         vm.stopPrank();
     }

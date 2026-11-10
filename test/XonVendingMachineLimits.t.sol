@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Custodial} from "../src/Custodial.sol";
 import {XonVendingMachine} from "../src/XonVendingMachine.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 
@@ -19,7 +20,7 @@ contract XonVendingMachineLimitsTest is Test {
 
     function setUp() public {
         usdt = new MockUSDT();
-        vending = new XonVendingMachine(address(usdt), owner, RATE, relayer);
+        vending = new XonVendingMachine(address(usdt), owner, RATE, relayer, owner, owner);
         vm.deal(address(vending), 1_000 ether);
         usdt.mint(buyer, 10_000 * ONE_USDT);
         vm.prank(buyer);
@@ -110,7 +111,7 @@ contract XonVendingMachineLimitsTest is Test {
 
     function test_setNativeLimits_onlyOwner_andEmits() public {
         vm.prank(relayer);
-        vm.expectRevert(XonVendingMachine.NotOwner.selector);
+        vm.expectRevert(Custodial.NotOwner.selector);
         vending.setNativeLimits(1, 1);
 
         vm.expectEmit(address(vending));
@@ -205,7 +206,7 @@ contract XonVendingMachineLimitsTest is Test {
         vending.updateRate(0);
 
         vm.prank(keeper);
-        vm.expectRevert(XonVendingMachine.NotOwner.selector);
+        vm.expectRevert(Custodial.NotOwner.selector);
         vending.setRateKeeper(keeper, 10_000, 0);
     }
 

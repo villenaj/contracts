@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Custodial} from "../src/Custodial.sol";
 import {EthUsdtGateway} from "../src/ethereum/EthUsdtGateway.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {TetherLikeUsdt} from "./mocks/TetherLikeUsdt.sol";
@@ -16,7 +17,7 @@ contract EthUsdtGatewayTest is Test {
 
     function setUp() public {
         usdt = new MockUSDT();
-        gateway = new EthUsdtGateway(address(usdt), owner);
+        gateway = new EthUsdtGateway(address(usdt), owner, owner, owner);
         usdt.mint(depositor, 1_000_000_000); // 1,000 USDT
     }
 
@@ -48,7 +49,7 @@ contract EthUsdtGatewayTest is Test {
     function test_deposit_revertsOnZeroBeneficiary() public {
         vm.startPrank(depositor);
         require(usdt.approve(address(gateway), 10_000_000));
-        vm.expectRevert(EthUsdtGateway.ZeroAddress.selector);
+        vm.expectRevert(Custodial.ZeroAddress.selector);
         gateway.deposit(10_000_000, address(0));
         vm.stopPrank();
     }
@@ -65,7 +66,7 @@ contract EthUsdtGatewayTest is Test {
 
         vm.startPrank(depositor);
         require(usdt.approve(address(gateway), 10_000_000));
-        vm.expectRevert(EthUsdtGateway.IsPaused.selector);
+        vm.expectRevert(Custodial.IsPaused.selector);
         gateway.deposit(10_000_000, xodeBeneficiary);
         vm.stopPrank();
     }
@@ -77,11 +78,12 @@ contract EthUsdtGatewayTest is Test {
         vm.stopPrank();
 
         vm.prank(depositor);
-        vm.expectRevert(EthUsdtGateway.NotOwner.selector);
-        gateway.withdraw(depositor, 10_000_000);
+        vm.expectRevert(Custodial.NotOwner.selector);
+        gateway.withdraw(10_000_000);
 
+        // The treasury starts as the deploying owner.
         vm.prank(owner);
-        gateway.withdraw(owner, 10_000_000);
+        gateway.withdraw(10_000_000);
         assertEq(usdt.balanceOf(owner), 10_000_000);
     }
 
@@ -89,31 +91,37 @@ contract EthUsdtGatewayTest is Test {
         address newOwner = makeAddr("newOwner");
 
         vm.prank(depositor);
-        vm.expectRevert(EthUsdtGateway.NotOwner.selector);
+        vm.expectRevert(Custodial.NotOwner.selector);
         gateway.transferOwnership(newOwner);
 
         vm.prank(owner);
         gateway.transferOwnership(newOwner);
+        assertEq(gateway.owner(), owner, "nominating doesn't hand over ownership");
+        assertEq(gateway.pendingOwner(), newOwner);
+
+        vm.prank(newOwner);
+        gateway.acceptOwnership();
         assertEq(gateway.owner(), newOwner);
+        assertEq(gateway.pendingOwner(), address(0));
 
         vm.prank(owner);
-        vm.expectRevert(EthUsdtGateway.NotOwner.selector);
+        vm.expectRevert(Custodial.NotOwner.selector);
         gateway.setPaused(true);
     }
 
     function test_constructor_rejectsZeroAddresses() public {
-        vm.expectRevert(EthUsdtGateway.ZeroAddress.selector);
-        new EthUsdtGateway(address(0), owner);
+        vm.expectRevert(Custodial.ZeroAddress.selector);
+        new EthUsdtGateway(address(0), owner, owner, owner);
 
-        vm.expectRevert(EthUsdtGateway.ZeroAddress.selector);
-        new EthUsdtGateway(address(usdt), address(0));
+        vm.expectRevert(Custodial.ZeroAddress.selector);
+        new EthUsdtGateway(address(usdt), address(0), address(0), address(0));
     }
 
     // --- Ethereum's real USDT: no return values, optional transfer fee ---
 
     function _tetherGateway() internal returns (EthUsdtGateway tetherGateway, TetherLikeUsdt tether) {
         tether = new TetherLikeUsdt();
-        tetherGateway = new EthUsdtGateway(address(tether), owner);
+        tetherGateway = new EthUsdtGateway(address(tether), owner, owner, owner);
         tether.mint(depositor, 1_000_000_000);
     }
 
@@ -138,7 +146,7 @@ contract EthUsdtGatewayTest is Test {
         vm.stopPrank();
 
         vm.prank(owner);
-        tetherGateway.withdraw(owner, 10_000_000);
+        tetherGateway.withdraw(10_000_000);
         assertEq(tether.balanceOf(owner), 10_000_000);
     }
 
@@ -167,7 +175,7 @@ contract EthUsdtGatewayTest is Test {
         vm.mockCall(address(usdt), abi.encodeWithSelector(MockUSDT.transfer.selector), abi.encode(false));
         vm.prank(owner);
         vm.expectRevert(EthUsdtGateway.UsdtTransferFailed.selector);
-        gateway.withdraw(owner, 1);
+        gateway.withdraw(1);
     }
 
     // --- depositForSwap: market-price deposits ---------------------------------------------------
@@ -206,7 +214,7 @@ contract EthUsdtGatewayTest is Test {
     function test_depositForSwap_keepsDepositsGuards() public {
         vm.startPrank(depositor);
         require(usdt.approve(address(gateway), 10_000_000));
-        vm.expectRevert(EthUsdtGateway.ZeroAddress.selector);
+        vm.expectRevert(Custodial.ZeroAddress.selector);
         gateway.depositForSwap(10_000_000, address(0), 1 ether);
         vm.expectRevert(EthUsdtGateway.ZeroAmount.selector);
         gateway.depositForSwap(0, xodeBeneficiary, 1 ether);
@@ -215,7 +223,7 @@ contract EthUsdtGatewayTest is Test {
         vm.prank(owner);
         gateway.setPaused(true);
         vm.prank(depositor);
-        vm.expectRevert(EthUsdtGateway.IsPaused.selector);
+        vm.expectRevert(Custodial.IsPaused.selector);
         gateway.depositForSwap(10_000_000, xodeBeneficiary, 1 ether);
     }
 
