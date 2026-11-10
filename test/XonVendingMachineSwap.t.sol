@@ -78,6 +78,10 @@ contract XonVendingMachineSwapTest is Test {
     }
 
     function _swap(uint256 usdtAmount, uint256 minXonOut, bytes32 depositId) internal {
+        if (!vending.hasAttested(depositId, relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalSwap(buyer, usdtAmount, minXonOut, "ethereum", depositId);
+        }
         vm.prank(relayer);
         vending.settleExternalSwap(buyer, usdtAmount, minXonOut, "ethereum", depositId);
     }
@@ -86,6 +90,8 @@ contract XonVendingMachineSwapTest is Test {
 
     function test_paysBuyerWhatTheSwapReturned() public {
         uint256 allowanceBefore = vending.externalAvailable();
+        vm.prank(relayer);
+        vending.attestExternalSwap(buyer, 2 * ONE_USDT, 0.38 ether, "ethereum", DEPOSIT);
 
         vm.expectEmit(true, true, true, true, address(vending));
         emit XonVendingMachine.ExternalSwapSettled(buyer, "ethereum", DEPOSIT, 2 * ONE_USDT, SWAP_OUT);
@@ -124,6 +130,10 @@ contract XonVendingMachineSwapTest is Test {
         xcm.configure(usdt, 2 * ONE_USDT, SWAP_OUT, address(0), true);
         uint256 allowanceBefore = vending.externalAvailable();
 
+        if (!vending.hasAttested(DEPOSIT, relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalSwap(buyer, 2 * ONE_USDT, 1 ether, "ethereum", DEPOSIT);
+        }
         vm.prank(relayer);
         vm.expectRevert(bytes("LocalExecutionIncomplete: NoDeal"));
         vending.settleExternalSwap(buyer, 2 * ONE_USDT, 1 ether, "ethereum", DEPOSIT);
@@ -139,6 +149,10 @@ contract XonVendingMachineSwapTest is Test {
         // if the XON ever landed somewhere other than this contract.
         xcm.configure(usdt, 2 * ONE_USDT, SWAP_OUT, makeAddr("elsewhere"), false);
 
+        if (!vending.hasAttested(DEPOSIT, relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalSwap(buyer, 2 * ONE_USDT, 0.38 ether, "ethereum", DEPOSIT);
+        }
         vm.prank(relayer);
         vm.expectRevert(XonVendingMachine.SlippageExceeded.selector);
         vending.settleExternalSwap(buyer, 2 * ONE_USDT, 0.38 ether, "ethereum", DEPOSIT);
@@ -156,13 +170,17 @@ contract XonVendingMachineSwapTest is Test {
 
         // 60 USDT is more than the 50 of inventory, though the balance (80) would cover it.
         xcm.configure(usdt, 60 * ONE_USDT, SWAP_OUT, address(0), false);
+        if (!vending.hasAttested(DEPOSIT, relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalSwap(buyer, 60 * ONE_USDT, 1 ether, "ethereum", DEPOSIT);
+        }
         vm.prank(relayer);
         vm.expectRevert(XonVendingMachine.InsufficientUsdtInventory.selector);
         vending.settleExternalSwap(buyer, 60 * ONE_USDT, 1 ether, "ethereum", DEPOSIT);
 
         // Spend all 50 of inventory; the pending deposit still settles afterwards.
         xcm.configure(usdt, 50 * ONE_USDT, SWAP_OUT, address(0), false);
-        _swap(50 * ONE_USDT, 0.38 ether, DEPOSIT);
+        _swap(50 * ONE_USDT, 0.38 ether, keccak256("ethereum-deposit-50"));
         vm.deal(address(vending), 1_000 ether);
         vm.prank(owner);
         vending.setNativeLimits(100 * ONE_USDT, 1_000 * ONE_USDT);
@@ -190,7 +208,7 @@ contract XonVendingMachineSwapTest is Test {
 
     function test_onlyRelayer() public {
         vm.prank(owner);
-        vm.expectRevert(XonVendingMachine.NotRelayer.selector);
+        vm.expectRevert(XonVendingMachine.NotAttester.selector);
         vending.settleExternalSwap(buyer, 2 * ONE_USDT, 1 ether, "ethereum", DEPOSIT);
     }
 
@@ -216,12 +234,20 @@ contract XonVendingMachineSwapTest is Test {
     function test_externalLimitsApply() public {
         vm.prank(owner);
         vending.setExternalLimits(ONE_USDT, 1_000 * ONE_USDT);
+        if (!vending.hasAttested(DEPOSIT, relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalSwap(buyer, 2 * ONE_USDT, 1 ether, "ethereum", DEPOSIT);
+        }
         vm.prank(relayer);
         vm.expectRevert(XonVendingMachine.OverExternalDepositLimit.selector);
         vending.settleExternalSwap(buyer, 2 * ONE_USDT, 1 ether, "ethereum", DEPOSIT);
 
         vm.prank(owner);
         vending.setExternalLimits(100 * ONE_USDT, ONE_USDT);
+        if (!vending.hasAttested(DEPOSIT, relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalSwap(buyer, 2 * ONE_USDT, 1 ether, "ethereum", DEPOSIT);
+        }
         vm.prank(relayer);
         vm.expectRevert(XonVendingMachine.OverExternalDailyLimit.selector);
         vending.settleExternalSwap(buyer, 2 * ONE_USDT, 1 ether, "ethereum", DEPOSIT);
@@ -229,6 +255,10 @@ contract XonVendingMachineSwapTest is Test {
 
     function test_aDepositIsPaidOnlyOnce_acrossBothExternalPaths() public {
         vm.deal(address(vending), 100 ether);
+        if (!vending.hasAttested(DEPOSIT, relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalPurchase(buyer, 2 * ONE_USDT, "ethereum", DEPOSIT);
+        }
         vm.prank(relayer);
         vending.settleExternalPurchase(buyer, 2 * ONE_USDT, "ethereum", DEPOSIT);
 

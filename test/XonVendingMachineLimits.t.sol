@@ -127,6 +127,10 @@ contract XonVendingMachineLimitsTest is Test {
         vm.stopPrank();
         _buy(10 * ONE_USDT);
         assertEq(vending.externalAvailable(), 10 * ONE_USDT);
+        if (!vending.hasAttested(keccak256("eth"), relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalPurchase(buyer, 10 * ONE_USDT, "ethereum", keccak256("eth"));
+        }
         vm.prank(relayer);
         vending.settleExternalPurchase(buyer, 10 * ONE_USDT, "ethereum", keccak256("eth"));
         assertEq(vending.externalAvailable(), 0);

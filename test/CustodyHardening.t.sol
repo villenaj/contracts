@@ -171,7 +171,7 @@ contract CustodyHardeningTest is Test {
         vm.expectRevert(Custodial.NotOwner.selector);
         gateway.proposeTreasury(guardian);
         vm.expectRevert(Custodial.NotOwner.selector);
-        gateway.refund(0, alice, 10e6);
+        gateway.refund(0, alice, 10e6, false);
         vm.expectRevert(Custodial.NoPendingTreasury.selector);
         gateway.cancelTreasuryChange();
         vm.stopPrank();
@@ -196,14 +196,14 @@ contract CustodyHardeningTest is Test {
         assertEq(gateway.depositRecords(nonce), keccak256(abi.encode(alice, uint256(10e6))));
 
         vm.expectEmit(address(gateway));
-        emit EthUsdtGateway.Refunded(nonce, alice, 10e6);
+        emit EthUsdtGateway.Refunded(nonce, alice, alice, 10e6, 0);
         vm.prank(owner);
-        gateway.refund(nonce, alice, 10e6);
+        gateway.refund(nonce, alice, 10e6, false);
         assertEq(usdt.balanceOf(alice), 100e6);
 
         vm.prank(owner);
         vm.expectRevert(EthUsdtGateway.UnknownDeposit.selector);
-        gateway.refund(nonce, alice, 10e6);
+        gateway.refund(nonce, alice, 10e6, false);
     }
 
     function test_refundCantBeRedirectedOrInflated() public {
@@ -211,11 +211,11 @@ contract CustodyHardeningTest is Test {
         _deposit(bob, 30e6);
         vm.startPrank(owner);
         vm.expectRevert(EthUsdtGateway.UnknownDeposit.selector);
-        gateway.refund(nonce, attacker, 10e6); // someone else
+        gateway.refund(nonce, attacker, 10e6, false); // someone else
         vm.expectRevert(EthUsdtGateway.UnknownDeposit.selector);
-        gateway.refund(nonce, alice, 30e6); // more than she paid
+        gateway.refund(nonce, alice, 30e6, false); // more than she paid
         vm.expectRevert(EthUsdtGateway.UnknownDeposit.selector);
-        gateway.refund(99, alice, 10e6); // no such deposit
+        gateway.refund(99, alice, 10e6, false); // no such deposit
         vm.stopPrank();
     }
 
@@ -224,7 +224,7 @@ contract CustodyHardeningTest is Test {
         vm.prank(alice);
         gateway.depositForSwap(7e6, beneficiary, 1 ether);
         vm.prank(owner);
-        gateway.refund(nonce, alice, 7e6);
+        gateway.refund(nonce, alice, 7e6, false);
         assertEq(usdt.balanceOf(alice), 100e6);
     }
 

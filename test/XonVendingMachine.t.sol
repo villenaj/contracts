@@ -277,6 +277,10 @@ contract XonVendingMachineTest is Test {
         bytes32 depositId = keccak256(abi.encode("ethereum", keccak256("some-eth-tx-hash")));
         uint256 expectedXon = vending.quote(usdtIn);
 
+        if (!vending.hasAttested(depositId, relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalPurchase(buyer, usdtIn, "ethereum", depositId);
+        }
         vm.prank(relayer);
         vending.settleExternalPurchase(buyer, usdtIn, "ethereum", depositId);
 
@@ -291,13 +295,17 @@ contract XonVendingMachineTest is Test {
         bytes32 depositId = keccak256("assethub-deposit-1");
 
         vm.prank(owner);
-        vm.expectRevert(XonVendingMachine.NotRelayer.selector);
+        vm.expectRevert(XonVendingMachine.NotAttester.selector);
         vending.settleExternalPurchase(buyer, 10_000_000, "assethub", depositId);
     }
 
     function test_settleExternalPurchase_revertsOnDoubleSettle() public {
         bytes32 depositId = keccak256("assethub-deposit-1");
 
+        if (!vending.hasAttested(depositId, relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalPurchase(buyer, 10_000_000, "assethub", depositId);
+        }
         vm.prank(relayer);
         vending.settleExternalPurchase(buyer, 10_000_000, "assethub", depositId);
 
@@ -323,6 +331,10 @@ contract XonVendingMachineTest is Test {
         bytes32 sharedId = keccak256("collision");
         bytes32 nativeDeposit = _depositUsdtDirectly(10_000_000);
 
+        if (!vending.hasAttested(sharedId, relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalPurchase(buyer, 5_000_000, "ethereum", sharedId);
+        }
         vm.prank(relayer);
         vending.settleExternalPurchase(buyer, 5_000_000, "ethereum", sharedId);
 
@@ -340,6 +352,10 @@ contract XonVendingMachineTest is Test {
     uint256 constant USDT_SCALE_RATE = 1_000_000;
 
     function _settleExternal(uint256 usdtIn, bytes32 depositId) internal {
+        if (!vending.hasAttested(depositId, relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalPurchase(buyer, usdtIn, "ethereum", depositId);
+        }
         vm.prank(relayer);
         vending.settleExternalPurchase(buyer, usdtIn, "ethereum", depositId);
     }
@@ -355,6 +371,10 @@ contract XonVendingMachineTest is Test {
         vm.deal(address(fresh), 100 * ONE_XON);
         assertEq(fresh.externalAvailable(), 0);
 
+        if (!fresh.hasAttested(keccak256("d"), relayer)) {
+            vm.prank(relayer);
+            fresh.attestExternalPurchase(buyer, 1 * USDT, "ethereum", keccak256("d"));
+        }
         vm.prank(relayer);
         vm.expectRevert(XonVendingMachine.OverExternalDepositLimit.selector);
         fresh.settleExternalPurchase(buyer, 1 * USDT, "ethereum", keccak256("d"));
@@ -363,6 +383,10 @@ contract XonVendingMachineTest is Test {
     function test_externalLimits_perDeposit() public {
         _setLimits(50 * USDT, 1_000 * USDT);
 
+        if (!vending.hasAttested(keccak256("big"), relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalPurchase(buyer, 50 * USDT + 1, "ethereum", keccak256("big"));
+        }
         vm.prank(relayer);
         vm.expectRevert(XonVendingMachine.OverExternalDepositLimit.selector);
         vending.settleExternalPurchase(buyer, 50 * USDT + 1, "ethereum", keccak256("big"));
@@ -376,6 +400,10 @@ contract XonVendingMachineTest is Test {
         _settleExternal(100 * USDT, keccak256("a"));
         assertEq(vending.externalAvailable(), 50 * USDT);
 
+        if (!vending.hasAttested(keccak256("b"), relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalPurchase(buyer, 60 * USDT, "ethereum", keccak256("b"));
+        }
         vm.prank(relayer);
         vm.expectRevert(XonVendingMachine.OverExternalDailyLimit.selector);
         vending.settleExternalPurchase(buyer, 60 * USDT, "ethereum", keccak256("b"));
@@ -395,6 +423,10 @@ contract XonVendingMachineTest is Test {
         _setLimits(100 * USDT, 300 * USDT);
         for (uint256 i = 0; i < 3; i++) _settleExternal(100 * USDT, keccak256(abi.encode("drain", i)));
 
+        if (!vending.hasAttested(keccak256("one-more"), relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalPurchase(buyer, 1 * USDT, "ethereum", keccak256("one-more"));
+        }
         vm.prank(relayer);
         vm.expectRevert(XonVendingMachine.OverExternalDailyLimit.selector);
         vending.settleExternalPurchase(buyer, 1 * USDT, "ethereum", keccak256("one-more"));
@@ -411,6 +443,10 @@ contract XonVendingMachineTest is Test {
         assertEq(vending.externalAvailable(), 0);
 
         _setLimits(0, 0); // and 0 turns the path off
+        if (!vending.hasAttested(keccak256("c"), relayer)) {
+            vm.prank(relayer);
+            vending.attestExternalPurchase(buyer, 1, "ethereum", keccak256("c"));
+        }
         vm.prank(relayer);
         vm.expectRevert(XonVendingMachine.OverExternalDepositLimit.selector);
         vending.settleExternalPurchase(buyer, 1, "ethereum", keccak256("c"));

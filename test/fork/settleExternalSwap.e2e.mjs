@@ -113,7 +113,15 @@ const quotePlanck = (await api.call.assetConversionApi.quotePriceExactTokensForT
 const minXonOut = (quotePlanck * RATIO * 99n) / 100n; // 1% slippage, in 18-decimal units
 console.log(`pool ${fmt(xonBefore, 12)} XON / ${fmt(usdtBefore, 6)} USDT; quote for 2 USDT: ${fmt(quotePlanck, 12)} XON; min ${fmt(minXonOut, 18)}`);
 
+// Cross-chain payouts need a quorum of attesters' votes first; here the one relayer is the only
+// attester (threshold 1), so its own vote is enough.
+const vote = async (args) => {
+  const v = await contractCall(vending, vendingIface, 'attestExternalSwap', args, 'attest');
+  check(v.ok, `attester voted for ${args[4].slice(0, 10)}…${v.ok ? '' : ` (${v.error})`}`);
+};
+
 const deposit1 = ethers.id('ethereum-deposit-1');
+await vote([buyer, 2_000_000n, minXonOut, 'ethereum', deposit1]);
 const swap = await contractCall(vending, vendingIface, 'settleExternalSwap', [buyer, 2_000_000n, minXonOut, 'ethereum', deposit1], 'settleExternalSwap');
 check(swap.ok, `settleExternalSwap${swap.ok ? '' : ` (${swap.error})`}`);
 if (swap.ok) {
@@ -134,6 +142,7 @@ if (swap.ok) {
 
 // --- 4. A minimum the pool can't meet -------------------------------------------------------
 const deposit2 = ethers.id('ethereum-deposit-2');
+await vote([buyer, 2_000_000n, ethers.parseEther('1000'), 'ethereum', deposit2]);
 const greedy = await contractCall(vending, vendingIface, 'settleExternalSwap', [buyer, 2_000_000n, ethers.parseEther('1000'), 'ethereum', deposit2], 'greedy');
 // The XCM precompile reverts with the same generic message for every XCM failure, so the reason
 // (minimum not met, swaps paused, pool pending) has to be worked out off-chain.
@@ -145,7 +154,9 @@ check((await read(vending, vendingIface, 'accountedUsdt')) === 48_000_000n, '...
 const name = (s) => api.createType('Bytes', s);
 const key = api.query.txPause.pausedCalls.key([name('AssetConversion'), name('swap_exact_tokens_for_tokens')]);
 await api.rpc('dev_setStorage', [[key, '0x00']]);
-const paused = await contractCall(vending, vendingIface, 'settleExternalSwap', [buyer, 2_000_000n, 1n, 'ethereum', deposit2], 'paused');
+const deposit3 = ethers.id('ethereum-deposit-3');
+await vote([buyer, 2_000_000n, 1n, 'ethereum', deposit3]);
+const paused = await contractCall(vending, vendingIface, 'settleExternalSwap', [buyer, 2_000_000n, 1n, 'ethereum', deposit3], 'paused');
 check(!paused.ok, `with swaps paused in TxPause, the contract can't swap either (${paused.error})`);
 await api.rpc('dev_setStorage', [[key, null]]);
 

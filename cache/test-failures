@@ -1,1 +1,1 @@
-{"version":1,"failures":[{"contract":"test/XcmSwap.t.sol:XcmSwapTest","test":"test_matchesPolkadotJs_bigIntegerAmounts"},{"contract":"test/XcmSwap.t.sol:XcmSwapTest","test":"test_matchesPolkadotJs_singleByteAmounts"},{"contract":"test/XcmSwap.t.sol:XcmSwapTest","test":"test_matchesPolkadotJs_twoAndFourByteAmounts"}]}
+{"version":1,"failures":[{"contract":"test/LoopholeFixes.t.sol:LoopholeFixesTest","test":"test_addressLimit_oneBuyerCantTakeEveryonesAllowance"}]}

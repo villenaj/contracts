@@ -11,6 +11,12 @@ pragma solidity ^0.8.24;
 ///  - A guardian, meant to be a different key or multisig than the owner: it can pause the contract
 ///    and cancel a pending treasury change - nothing else - and only it can hand its role on, so a
 ///    compromised owner can't redirect funds before the guardian can step in.
+///  - A change queue for settings that could hand out funds (raising limits or the rate, changing
+///    who may settle payouts, ...): once setup is finished, such a call only goes through if its
+///    exact calldata was queued with `queueChange` at least `CHANGE_DELAY` earlier, and the guardian
+///    can cancel it meanwhile. So taking over the owner (say, two of an ops Safe's signers) buys an
+///    attacker 48 public hours, not an instant drain. Changes that only make things safer
+///    (lowering a limit, pausing) stay instant.
 abstract contract Custodial {
     address public owner;
     /// Nominated by `transferOwnership`; becomes owner once it calls `acceptOwnership`.
@@ -24,6 +30,13 @@ abstract contract Custodial {
 
     address public guardian;
 
+    /// Until `finishSetup` (or the first `transferOwnership`), the deployer configures the contract
+    /// freely; after it, the risky setters need a queued change.
+    bool public setupFinished;
+    uint256 public constant CHANGE_DELAY = 2 days;
+    /// keccak256(calldata) of a queued call -> when it may run (0: not queued).
+    mapping(bytes32 => uint256) public queuedChangeReadyAt;
+
     event PausedSet(bool paused);
     event OwnerTransferred(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferStarted(address indexed owner, address indexed pendingOwner);
@@ -31,6 +44,10 @@ abstract contract Custodial {
     event TreasuryChangeCancelled(address indexed treasury);
     event TreasuryChanged(address indexed previousTreasury, address indexed treasury);
     event GuardianTransferred(address indexed previousGuardian, address indexed guardian);
+    event SetupFinished();
+    event ChangeQueued(bytes32 indexed id, bytes call, uint256 readyAt);
+    event ChangeCancelled(bytes32 indexed id);
+    event ChangeApplied(bytes32 indexed id);
 
     error NotOwner();
     error NotPendingOwner();
@@ -39,6 +56,8 @@ abstract contract Custodial {
     error ZeroAddress();
     error NoPendingTreasury();
     error TreasuryChangeNotReady();
+    error ChangeNotQueued();
+    error ChangeNotReady();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -97,6 +116,48 @@ abstract contract Custodial {
         pendingTreasuryReadyAt = 0;
     }
 
+    // --- delayed changes: queued with their exact calldata, cancellable by the guardian ---------
+
+    /// Ends the setup phase: from now on the risky setters need `queueChange`. Irreversible.
+    function finishSetup() external onlyOwner {
+        _finishSetup();
+    }
+
+    function _finishSetup() private {
+        if (setupFinished) return;
+        setupFinished = true;
+        emit SetupFinished();
+    }
+
+    /// Queues `call` - the exact calldata of a later call to this contract - to be allowed after
+    /// `CHANGE_DELAY`. Its id is `keccak256(call)`; watch `ChangeQueued` to see what's coming.
+    function queueChange(bytes calldata call) external onlyOwner {
+        bytes32 id = keccak256(call);
+        uint256 readyAt = block.timestamp + CHANGE_DELAY;
+        queuedChangeReadyAt[id] = readyAt;
+        emit ChangeQueued(id, call, readyAt);
+    }
+
+    /// The owner withdrawing a queued change, or the guardian stopping one.
+    function cancelChange(bytes32 id) external {
+        if (msg.sender != owner && msg.sender != guardian) revert NotGuardian();
+        if (queuedChangeReadyAt[id] == 0) revert ChangeNotQueued();
+        delete queuedChangeReadyAt[id];
+        emit ChangeCancelled(id);
+    }
+
+    /// Called by a setter for a change that must wait: lets the current call through only if its
+    /// calldata was queued and the delay has passed, and uses the queued entry up.
+    function _requireQueued() internal {
+        if (!setupFinished) return;
+        bytes32 id = keccak256(msg.data);
+        uint256 readyAt = queuedChangeReadyAt[id];
+        if (readyAt == 0) revert ChangeNotQueued();
+        if (block.timestamp < readyAt) revert ChangeNotReady();
+        delete queuedChangeReadyAt[id];
+        emit ChangeApplied(id);
+    }
+
     // --- guardian ---------------------------------------------------------------------------------
 
     function transferGuardian(address newGuardian) external {
@@ -109,7 +170,9 @@ abstract contract Custodial {
     // --- ownership, in two steps ------------------------------------------------------------------
 
     /// Nominates `newOwner`, who becomes owner by calling `acceptOwnership`. `address(0)` cancels.
+    /// Handing the contract over also ends its setup phase.
     function transferOwnership(address newOwner) external onlyOwner {
+        _finishSetup();
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
     }
