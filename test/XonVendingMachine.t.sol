@@ -33,6 +33,9 @@ contract XonVendingMachineTest is Test {
         // External payouts are off until the owner sets limits - open them up for the tests below.
         vm.prank(owner);
         vending.setExternalLimits(100_000_000, 1_000_000_000); // 100 USDT per deposit, 1,000 per day
+        // Native purchases are off by default too; these tests are about everything else.
+        vm.prank(owner);
+        vending.setNativeLimits(type(uint256).max, type(uint256).max);
     }
 
     function test_buy_transfersUsdtInAndXonOut() public {

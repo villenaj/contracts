@@ -163,6 +163,8 @@ contract XonVendingMachineSwapTest is Test {
         xcm.configure(usdt, 50 * ONE_USDT, SWAP_OUT, address(0), false);
         _swap(50 * ONE_USDT, 0.38 ether, DEPOSIT);
         vm.deal(address(vending), 1_000 ether);
+        vm.prank(owner);
+        vending.setNativeLimits(100 * ONE_USDT, 1_000 * ONE_USDT);
         vm.prank(relayer);
         vending.settlePurchase(nativeBuyer, 30 * ONE_USDT, keccak256("native-tx"));
         assertEq(nativeBuyer.balance, vending.quote(30 * ONE_USDT));

@@ -44,6 +44,12 @@ import {IXcm, XcmSwap} from "./XcmSwap.sol";
 /// pool's. It only ever spends `accountedUsdt` - USDT already paid for by completed purchases or
 /// added with `fundUsdtInventory` - never a native deposit that hasn't been settled yet.
 ///
+/// The fixed `rate` can drift from the DEX price, and anyone can then buy here and sell there.
+/// Two things bound that: the Xode-native paths (`buy`, `settlePurchase`) have their own
+/// per-purchase limit and refilling daily allowance (`setNativeLimits`, starting at zero like the
+/// external ones), and an optional `rateKeeper` - a key that isn't the owner - may move `rate`
+/// toward the market by at most `maxRateStepBps` per `minRateUpdateInterval` (`updateRate`).
+///
 /// `rate` is XON paid out per 1 whole USDT, expressed the way Solidity sees native value on
 /// Xode: `pallet_revive`'s `NativeToEthRatio` (1e18/1e12 = 1_000_000) rescales the chain's
 /// 12-decimal native `Balance` up to standard 18-decimal EVM/"ether" units at the call boundary,
@@ -64,6 +70,22 @@ contract XonVendingMachine {
     /// The external allowance as of `_externalAllowanceAt`; `externalAvailable()` adds the refill since.
     uint256 private _externalAllowance;
     uint256 private _externalAllowanceAt;
+
+    /// Limits on the Xode-native paths (`buy`, `settlePurchase`), in raw USDT units, working like
+    /// the external ones. They bound what arbitrage against the fixed `rate` can take when the DEX
+    /// price moves away from it. Both start at zero: native purchases are off until the owner sets them.
+    uint256 public maxNativePerPurchase;
+    uint256 public maxNativePerDay;
+    uint256 private _nativeAllowance;
+    uint256 private _nativeAllowanceAt;
+
+    /// May nudge `rate` toward the market (`updateRate`), by at most `maxRateStepBps` per update and
+    /// at most once per `minRateUpdateInterval` seconds - so a keeper key on a server can track the
+    /// DEX price without being able to move the rate far or fast if it's stolen. Unset: no keeper.
+    address public rateKeeper;
+    uint256 public maxRateStepBps;
+    uint256 public minRateUpdateInterval;
+    uint256 public lastRateUpdate;
 
     uint256 private constant USDT_SCALE = 1e6;
     /// `pallet_revive`'s `NativeToEthRatio` on Xode: 1 planck (XON's 12-decimal native unit) is
@@ -91,6 +113,8 @@ contract XonVendingMachine {
     event OwnerTransferred(address indexed previousOwner, address indexed newOwner);
     event RelayerUpdated(address indexed previousRelayer, address indexed newRelayer);
     event ExternalLimitsSet(uint256 maxPerDeposit, uint256 maxPerDay);
+    event NativeLimitsSet(uint256 maxPerPurchase, uint256 maxPerDay);
+    event RateKeeperSet(address indexed keeper, uint256 maxStepBps, uint256 minInterval);
     event Deposited(address indexed from, uint256 amount);
     event ExternalSwapSettled(
         address indexed buyer,
@@ -115,6 +139,11 @@ contract XonVendingMachine {
     error AlreadyExternallySettled();
     error OverExternalDepositLimit();
     error OverExternalDailyLimit();
+    error OverNativePurchaseLimit();
+    error OverNativeDailyLimit();
+    error NotRateKeeper();
+    error RateStepTooLarge();
+    error RateUpdateTooSoon();
     error InsufficientUsdtInventory();
     error SlippageExceeded();
 
@@ -157,6 +186,7 @@ contract XonVendingMachine {
     /// `usdt.approve(address(this), usdtAmount)` from the caller.
     function buy(uint256 usdtAmount) external whenNotPaused nonReentrant {
         if (usdtAmount == 0) revert ZeroAmount();
+        _useNativeAllowance(usdtAmount);
 
         uint256 xonOut = quote(usdtAmount);
         if (xonOut == 0) revert ZeroAmount();
@@ -188,6 +218,7 @@ contract XonVendingMachine {
         if (usdtAmount == 0) revert ZeroAmount();
         if (settledDeposits[depositTxHash]) revert AlreadySettled();
         if (accountedUsdt + usdtAmount > usdt.balanceOf(address(this))) revert UnverifiedDeposit();
+        _useNativeAllowance(usdtAmount);
 
         uint256 xonOut = quote(usdtAmount);
         if (xonOut == 0) revert ZeroAmount();
@@ -304,13 +335,43 @@ contract XonVendingMachine {
     /// USDT that `settleExternalPurchase` can still pay for right now: the allowance left after
     /// recent payouts, refilled at `maxExternalPerDay` per 24 hours, never above `maxExternalPerDay`.
     function externalAvailable() public view returns (uint256) {
-        uint256 cap = maxExternalPerDay;
-        uint256 allowance = _externalAllowance;
-        uint256 elapsed = block.timestamp - _externalAllowanceAt;
+        return _available(maxExternalPerDay, _externalAllowance, _externalAllowanceAt);
+    }
+
+    /// USDT that `buy` / `settlePurchase` can still take right now, refilled the same way.
+    function nativeAvailable() public view returns (uint256) {
+        return _available(maxNativePerDay, _nativeAllowance, _nativeAllowanceAt);
+    }
+
+    /// `allowance` as of `at`, refilled at `cap` per 24 hours, never above `cap`.
+    function _available(uint256 cap, uint256 allowance, uint256 at) private view returns (uint256) {
+        uint256 elapsed = block.timestamp - at;
         if (allowance >= cap || elapsed >= EXTERNAL_WINDOW) return cap;
         // cap * elapsed / EXTERNAL_WINDOW, split up so even cap = type(uint256).max can't overflow.
         uint256 refill = (cap / EXTERNAL_WINDOW) * elapsed + ((cap % EXTERNAL_WINDOW) * elapsed) / EXTERNAL_WINDOW;
         return refill >= cap - allowance ? cap : allowance + refill;
+    }
+
+    /// Spends `usdtAmount` of the native allowance: over the per-purchase limit reverts
+    /// `OverNativePurchaseLimit` (never payable until the owner raises it), over what's left of the
+    /// daily allowance reverts `OverNativeDailyLimit` (it refills over time).
+    function _useNativeAllowance(uint256 usdtAmount) private {
+        if (usdtAmount > maxNativePerPurchase) revert OverNativePurchaseLimit();
+        uint256 available = nativeAvailable();
+        if (usdtAmount > available) revert OverNativeDailyLimit();
+        _nativeAllowance = available - usdtAmount;
+        _nativeAllowanceAt = block.timestamp;
+    }
+
+    /// Sets the native limits (raw USDT units; 0 turns `buy` / `settlePurchase` off), carrying over
+    /// what's been used today the same way `setExternalLimits` does.
+    function setNativeLimits(uint256 maxPerPurchase, uint256 maxPerDay) external onlyOwner {
+        uint256 used = maxNativePerDay - nativeAvailable();
+        maxNativePerPurchase = maxPerPurchase;
+        maxNativePerDay = maxPerDay;
+        _nativeAllowance = maxPerDay > used ? maxPerDay - used : 0;
+        _nativeAllowanceAt = block.timestamp;
+        emit NativeLimitsSet(maxPerPurchase, maxPerDay);
     }
 
     /// Sets the external limits (raw USDT units; 0 turns the external path off). What's been paid
@@ -328,6 +389,28 @@ contract XonVendingMachine {
     function setRate(uint256 newRate) external onlyOwner {
         emit RateUpdated(rate, newRate);
         rate = newRate;
+        lastRateUpdate = block.timestamp;
+    }
+
+    /// Appoints the keeper allowed to call `updateRate`, and its bounds (`address(0)` removes it).
+    function setRateKeeper(address keeper, uint256 maxStepBps, uint256 minInterval) external onlyOwner {
+        rateKeeper = keeper;
+        maxRateStepBps = maxStepBps;
+        minRateUpdateInterval = minInterval;
+        emit RateKeeperSet(keeper, maxStepBps, minInterval);
+    }
+
+    /// The keeper moves `rate` toward the market: by at most `maxRateStepBps` of the current rate,
+    /// and no sooner than `minRateUpdateInterval` after the last change (by anyone).
+    function updateRate(uint256 newRate) external {
+        if (msg.sender != rateKeeper || rateKeeper == address(0)) revert NotRateKeeper();
+        if (newRate == 0) revert ZeroAmount();
+        if (block.timestamp < lastRateUpdate + minRateUpdateInterval) revert RateUpdateTooSoon();
+        uint256 step = newRate > rate ? newRate - rate : rate - newRate;
+        if (step * 10_000 > rate * maxRateStepBps) revert RateStepTooLarge();
+        emit RateUpdated(rate, newRate);
+        rate = newRate;
+        lastRateUpdate = block.timestamp;
     }
 
     function setRelayer(address newRelayer) external onlyOwner {
