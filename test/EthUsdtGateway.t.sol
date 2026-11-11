@@ -27,8 +27,8 @@ contract EthUsdtGatewayTest is Test {
         vm.startPrank(depositor);
         require(usdt.approve(address(gateway), amount));
         vm.expectEmit(true, true, false, true);
-        emit EthUsdtGateway.Deposited(depositor, xodeBeneficiary, amount, 0);
-        gateway.deposit(amount, xodeBeneficiary);
+        emit EthUsdtGateway.Deposited(depositor, xodeBeneficiary, amount, 0, 1);
+        gateway.deposit(amount, xodeBeneficiary, 1);
         vm.stopPrank();
 
         assertEq(usdt.balanceOf(address(gateway)), amount);
@@ -39,8 +39,8 @@ contract EthUsdtGatewayTest is Test {
     function test_deposit_incrementsNonceAcrossDeposits() public {
         vm.startPrank(depositor);
         require(usdt.approve(address(gateway), 30_000_000));
-        gateway.deposit(10_000_000, xodeBeneficiary);
-        gateway.deposit(20_000_000, xodeBeneficiary);
+        gateway.deposit(10_000_000, xodeBeneficiary, 1);
+        gateway.deposit(20_000_000, xodeBeneficiary, 1);
         vm.stopPrank();
 
         assertEq(gateway.depositNonce(), 2);
@@ -50,14 +50,14 @@ contract EthUsdtGatewayTest is Test {
         vm.startPrank(depositor);
         require(usdt.approve(address(gateway), 10_000_000));
         vm.expectRevert(Custodial.ZeroAddress.selector);
-        gateway.deposit(10_000_000, address(0));
+        gateway.deposit(10_000_000, address(0), 1);
         vm.stopPrank();
     }
 
     function test_deposit_revertsWithoutApproval() public {
         vm.prank(depositor);
         vm.expectRevert("MockUSDT: insufficient allowance");
-        gateway.deposit(10_000_000, xodeBeneficiary);
+        gateway.deposit(10_000_000, xodeBeneficiary, 1);
     }
 
     function test_deposit_revertsWhenPaused() public {
@@ -67,19 +67,34 @@ contract EthUsdtGatewayTest is Test {
         vm.startPrank(depositor);
         require(usdt.approve(address(gateway), 10_000_000));
         vm.expectRevert(Custodial.IsPaused.selector);
-        gateway.deposit(10_000_000, xodeBeneficiary);
+        gateway.deposit(10_000_000, xodeBeneficiary, 1);
         vm.stopPrank();
+    }
+
+    function _release(EthUsdtGateway gw, uint256 nonce, uint256 amount) internal {
+        uint256[] memory nonces = new uint256[](1);
+        address[] memory depositors = new address[](1);
+        uint256[] memory amounts = new uint256[](1);
+        (nonces[0], depositors[0], amounts[0]) = (nonce, depositor, amount);
+        vm.prank(owner);
+        gw.release(nonces, depositors, amounts);
     }
 
     function test_onlyOwner_canWithdraw() public {
         vm.startPrank(depositor);
         require(usdt.approve(address(gateway), 10_000_000));
-        gateway.deposit(10_000_000, xodeBeneficiary);
+        gateway.deposit(10_000_000, xodeBeneficiary, 1);
         vm.stopPrank();
 
         vm.prank(depositor);
         vm.expectRevert(Custodial.NotOwner.selector);
         gateway.withdraw(10_000_000);
+
+        // Still owed to the depositor until it's released as paid on Xode.
+        vm.prank(owner);
+        vm.expectRevert(EthUsdtGateway.OwedToDepositors.selector);
+        gateway.withdraw(10_000_000);
+        _release(gateway, 0, 10_000_000);
 
         // The treasury starts as the deploying owner.
         vm.prank(owner);
@@ -131,8 +146,8 @@ contract EthUsdtGatewayTest is Test {
         vm.startPrank(depositor);
         tether.approve(address(tetherGateway), 20_000_000);
         vm.expectEmit(true, true, true, true);
-        emit EthUsdtGateway.Deposited(depositor, xodeBeneficiary, 20_000_000, 0);
-        tetherGateway.deposit(20_000_000, xodeBeneficiary);
+        emit EthUsdtGateway.Deposited(depositor, xodeBeneficiary, 20_000_000, 0, 1);
+        tetherGateway.deposit(20_000_000, xodeBeneficiary, 1);
         vm.stopPrank();
 
         assertEq(tether.balanceOf(address(tetherGateway)), 20_000_000);
@@ -142,9 +157,10 @@ contract EthUsdtGatewayTest is Test {
         (EthUsdtGateway tetherGateway, TetherLikeUsdt tether) = _tetherGateway();
         vm.startPrank(depositor);
         tether.approve(address(tetherGateway), 10_000_000);
-        tetherGateway.deposit(10_000_000, xodeBeneficiary);
+        tetherGateway.deposit(10_000_000, xodeBeneficiary, 1);
         vm.stopPrank();
 
+        _release(tetherGateway, 0, 10_000_000);
         vm.prank(owner);
         tetherGateway.withdraw(10_000_000);
         assertEq(tether.balanceOf(owner), 10_000_000);
@@ -157,8 +173,8 @@ contract EthUsdtGatewayTest is Test {
         vm.startPrank(depositor);
         tether.approve(address(tetherGateway), 20_000_000);
         vm.expectEmit(true, true, true, true);
-        emit EthUsdtGateway.Deposited(depositor, xodeBeneficiary, 19_980_000, 0); // 20 USDT minus 0.02 fee
-        tetherGateway.deposit(20_000_000, xodeBeneficiary);
+        emit EthUsdtGateway.Deposited(depositor, xodeBeneficiary, 19_980_000, 0, 1); // 20 USDT minus 0.02 fee
+        tetherGateway.deposit(20_000_000, xodeBeneficiary, 1);
         vm.stopPrank();
 
         assertEq(tether.balanceOf(address(tetherGateway)), 19_980_000);
@@ -168,10 +184,11 @@ contract EthUsdtGatewayTest is Test {
         (EthUsdtGateway tetherGateway, ) = _tetherGateway();
         vm.prank(depositor);
         vm.expectRevert("TetherLikeUsdt: insufficient allowance");
-        tetherGateway.deposit(10_000_000, xodeBeneficiary);
+        tetherGateway.deposit(10_000_000, xodeBeneficiary, 1);
     }
 
     function test_withdraw_revertsWhenTheTokenReturnsFalse() public {
+        usdt.mint(address(gateway), 1); // something that isn't owed
         vm.mockCall(address(usdt), abi.encodeWithSelector(MockUSDT.transfer.selector), abi.encode(false));
         vm.prank(owner);
         vm.expectRevert(EthUsdtGateway.UsdtTransferFailed.selector);
@@ -195,7 +212,7 @@ contract EthUsdtGatewayTest is Test {
     function test_depositForSwap_sharesTheNonceWithDeposit() public {
         vm.startPrank(depositor);
         require(usdt.approve(address(gateway), 30_000_000));
-        gateway.deposit(10_000_000, xodeBeneficiary);
+        gateway.deposit(10_000_000, xodeBeneficiary, 1);
         vm.expectEmit(true, true, true, true);
         emit EthUsdtGateway.SwapDeposited(depositor, xodeBeneficiary, 20_000_000, 1, 1 ether);
         gateway.depositForSwap(20_000_000, xodeBeneficiary, 1 ether);

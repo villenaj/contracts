@@ -21,6 +21,10 @@ contract XonVendingMachineLimitsTest is Test {
     function setUp() public {
         usdt = new MockUSDT();
         vending = new XonVendingMachine(address(usdt), owner, RATE, relayer, owner, owner);
+        vm.startPrank(owner);
+        vending.setSource("ethereum", 1, address(0xE7));
+        vending.setSource("assethub", 420420419, address(0xA7));
+        vm.stopPrank();
         vm.deal(address(vending), 1_000 ether);
         usdt.mint(buyer, 10_000 * ONE_USDT);
         vm.prank(buyer);
@@ -129,10 +133,10 @@ contract XonVendingMachineLimitsTest is Test {
         assertEq(vending.externalAvailable(), 10 * ONE_USDT);
         if (!vending.hasAttested(keccak256("eth"), relayer)) {
             vm.prank(relayer);
-            vending.attestExternalPurchase(buyer, 10 * ONE_USDT, "ethereum", keccak256("eth"));
+            vending.attestExternalPurchase(buyer, 10 * ONE_USDT, 1, "ethereum", keccak256("eth"));
         }
         vm.prank(relayer);
-        vending.settleExternalPurchase(buyer, 10 * ONE_USDT, "ethereum", keccak256("eth"));
+        vending.settleExternalPurchase(buyer, 10 * ONE_USDT, 1, "ethereum", keccak256("eth"));
         assertEq(vending.externalAvailable(), 0);
     }
 

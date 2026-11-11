@@ -31,6 +31,10 @@ contract LoopholeFixesTest is Test {
     function setUp() public {
         usdt = new MockUSDT();
         vending = new XonVendingMachine(address(usdt), owner, 0.2 ether, relayerA, treasury, guardian);
+        vm.startPrank(owner);
+        vending.setSource("ethereum", 1, address(0xE7));
+        vending.setSource("assethub", 420420419, address(0xA7));
+        vm.stopPrank();
         gateway = new EthUsdtGateway(address(usdt), owner, treasury, guardian);
         vm.deal(address(vending), 1_000 ether);
 
@@ -60,12 +64,12 @@ contract LoopholeFixesTest is Test {
 
     function _vote(address attester, address buyer, uint256 amount, bytes32 id) internal {
         vm.prank(attester);
-        vending.attestExternalPurchase(buyer, amount, "ethereum", id);
+        vending.attestExternalPurchase(buyer, amount, 1, "ethereum", id);
     }
 
     function _settle(address attester, address buyer, uint256 amount, bytes32 id) internal {
         vm.prank(attester);
-        vending.settleExternalPurchase(buyer, amount, "ethereum", id);
+        vending.settleExternalPurchase(buyer, amount, 1, "ethereum", id);
     }
 
     // --- #1 the change queue ----------------------------------------------------------------------
@@ -165,6 +169,10 @@ contract LoopholeFixesTest is Test {
     function test_queue_handoverEndsSetup() public {
         XonVendingMachine fresh = new XonVendingMachine(address(usdt), owner, 0.2 ether, relayerA, treasury, guardian);
         vm.startPrank(owner);
+        fresh.setSource("ethereum", 1, address(0xE7));
+        fresh.setSource("assethub", 420420419, address(0xA7));
+        vm.stopPrank();
+        vm.startPrank(owner);
         fresh.setRate(1 ether); // setup: instant
         fresh.transferOwnership(makeAddr("newOwner"));
         assertTrue(fresh.setupFinished());
@@ -184,7 +192,7 @@ contract LoopholeFixesTest is Test {
 
     function test_quorum_paysOnceEnoughAttestersAgree() public {
         _vote(relayerA, alice, 10 * USDT, DEP);
-        assertEq(vending.attestations(DEP, vending.purchaseParams(alice, 10 * USDT, "ethereum")), 1);
+        assertEq(vending.attestations(DEP, vending.purchaseParams(alice, 10 * USDT, 1, "ethereum")), 1);
         _vote(relayerB, alice, 10 * USDT, DEP);
         _settle(relayerC, alice, 10 * USDT, DEP); // any attester may execute
         assertEq(alice.balance, 2 ether);
@@ -321,7 +329,7 @@ contract LoopholeFixesTest is Test {
     function test_gateway_minimumDeposit() public {
         vm.startPrank(alice);
         vm.expectRevert(EthUsdtGateway.BelowMinimumDeposit.selector);
-        gateway.deposit(1 * USDT - 1, bob);
+        gateway.deposit(1 * USDT - 1, bob, 1);
         vm.expectRevert(EthUsdtGateway.BelowMinimumDeposit.selector);
         gateway.depositForSwap(1 * USDT - 1, bob, 1);
         gateway.depositForSwap(1 * USDT, bob, 1);
@@ -347,7 +355,7 @@ contract LoopholeFixesTest is Test {
 
     function test_gateway_depositorNamesTheRefundAddress() public {
         vm.prank(alice);
-        gateway.deposit(10 * USDT, bob);
+        gateway.deposit(10 * USDT, bob, 1);
         address fresh = makeAddr("aliceFreshWallet");
 
         vm.prank(attacker);

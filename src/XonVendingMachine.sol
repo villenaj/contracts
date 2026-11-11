@@ -109,6 +109,24 @@ contract XonVendingMachine is Custodial {
     mapping(bytes32 => bool) public externalCancelled;
     /// Xode-native deposits the owner cancelled, to refund them from the treasury instead of paying XON.
     mapping(bytes32 => bool) public nativeCancelled;
+    /// For a deposit the attesters cancelled: whether its refund keeps the gateway's refund fee
+    /// (its own minimum couldn't be met) - fixed by the same vote, so nobody picks it alone.
+    mapping(bytes32 => bool) public cancelChargesFee;
+    /// keccak256(epoch, depositId) -> attester -> voted to cancel.
+    mapping(bytes32 => mapping(address => bool)) private _cancelVoted;
+    /// keccak256(keccak256(epoch, depositId), chargeFee) -> votes.
+    mapping(bytes32 => uint256) private _cancelVotes;
+
+    /// The chains external deposits may come from, by the label used in deposit ids and events
+    /// ("ethereum", "assethub"): the chain's id and the gateway contract on it. A deposit is only
+    /// ever attested or paid for a registered source, its votes are bound to that registration, and
+    /// every attester checks its own RPC against it before it starts - so a relayer pointed at the
+    /// wrong network or the wrong contract can't get a deposit paid.
+    struct Source {
+        uint256 chainId;
+        address gateway;
+    }
+    mapping(bytes32 => Source) private _sources;
 
     /// Per buyer / beneficiary, across all paths, in raw USDT units; 0 = no per-address limit.
     uint256 public maxPerAddressPerDay;
@@ -159,6 +177,11 @@ contract XonVendingMachine is Custodial {
     event AttesterRemoved(address indexed attester);
     event AttestationThresholdSet(uint256 threshold);
     event DepositCancelled(bytes32 indexed depositId);
+    event ExternalCancelAttested(bytes32 indexed depositId, address indexed attester, bool chargeFee, uint256 votes);
+    /// An attester's signature over the gateway's `refundDigest` for a cancelled deposit, published
+    /// here so whoever submits the refund on the source chain can collect a quorum of them.
+    event RefundSigned(bytes32 indexed depositId, address indexed attester, bytes signature);
+    event SourceSet(string sourceChain, uint256 chainId, address gateway);
     event NativeDepositCancelled(bytes32 indexed depositTxHash, uint256 usdtAmount);
     event AddressLimitSet(uint256 maxPerDay);
     event FixedRatePauseSet(bool byOwner, bool byKeeper);
@@ -189,6 +212,9 @@ contract XonVendingMachine is Custodial {
     error DepositIsCancelled();
     error OverAddressDailyLimit();
     error FixedRatePaused();
+    error BelowMinimum();
+    error UnknownSource();
+    error NotCancelled();
 
     modifier onlyRelayer() {
         if (msg.sender != relayer) revert NotRelayer();
@@ -294,18 +320,22 @@ contract XonVendingMachine is Custodial {
     /// Bounded by the external limits: over `maxExternalPerDeposit` reverts
     /// `OverExternalDepositLimit` (the owner has to raise it for that deposit to ever be paid); over
     /// what's left of the daily allowance reverts `OverExternalDailyLimit` (it refills over time).
+    /// `minXonOut` is the depositor's own minimum, from the deposit's event: if `rate` now gives
+    /// less, this reverts `BelowMinimum` and the deposit is refunded instead.
     function settleExternalPurchase(
         address buyer,
         uint256 usdtAmount,
+        uint256 minXonOut,
         string calldata sourceChain,
         bytes32 depositId
     ) external whenNotPaused whenFixedRateOpen nonReentrant {
         _requireOpen(buyer, usdtAmount, depositId);
-        _requireQuorum(depositId, purchaseParams(buyer, usdtAmount, sourceChain));
-        _useExternalAllowance(buyer, usdtAmount);
+        _requireQuorum(depositId, purchaseParams(buyer, usdtAmount, minXonOut, sourceChain));
 
         uint256 xonOut = quote(usdtAmount);
         if (xonOut == 0) revert ZeroAmount();
+        if (xonOut < minXonOut) revert BelowMinimum();
+        _useExternalAllowance(buyer, usdtAmount);
         if (address(this).balance < xonOut) revert InsufficientReserve();
 
         externalSettledDeposits[depositId] = true;
@@ -350,12 +380,15 @@ contract XonVendingMachine is Custodial {
     // --- attestations: an external payout needs a quorum of attesters -----------------------------
 
     /// An attester's vote that a fixed-rate deposit with exactly these parameters happened.
-    function attestExternalPurchase(address buyer, uint256 usdtAmount, string calldata sourceChain, bytes32 depositId)
-        external
-        whenNotPaused
-    {
+    function attestExternalPurchase(
+        address buyer,
+        uint256 usdtAmount,
+        uint256 minXonOut,
+        string calldata sourceChain,
+        bytes32 depositId
+    ) external whenNotPaused {
         _requireOpen(buyer, usdtAmount, depositId);
-        _attest(depositId, purchaseParams(buyer, usdtAmount, sourceChain));
+        _attest(depositId, purchaseParams(buyer, usdtAmount, minXonOut, sourceChain));
     }
 
     /// An attester's vote that a market-price deposit with exactly these parameters happened.
@@ -371,16 +404,46 @@ contract XonVendingMachine is Custodial {
         _attest(depositId, swapParams(buyer, usdtAmount, minXonOut, sourceChain));
     }
 
-    function purchaseParams(address buyer, uint256 usdtAmount, string calldata sourceChain) public pure returns (bytes32) {
-        return keccak256(abi.encode("purchase", buyer, usdtAmount, sourceChain));
+    /// What a vote is for. It includes the source's registered chain id and gateway, so votes cast
+    /// for one registration never count for another. Reverts `UnknownSource` for an unregistered label.
+    function purchaseParams(address buyer, uint256 usdtAmount, uint256 minXonOut, string calldata sourceChain)
+        public
+        view
+        returns (bytes32)
+    {
+        Source memory s = _requireSource(sourceChain);
+        return keccak256(abi.encode("purchase", buyer, usdtAmount, minXonOut, sourceChain, s.chainId, s.gateway));
     }
 
     function swapParams(address buyer, uint256 usdtAmount, uint256 minXonOut, string calldata sourceChain)
         public
-        pure
+        view
         returns (bytes32)
     {
-        return keccak256(abi.encode("swap", buyer, usdtAmount, minXonOut, sourceChain));
+        Source memory s = _requireSource(sourceChain);
+        return keccak256(abi.encode("swap", buyer, usdtAmount, minXonOut, sourceChain, s.chainId, s.gateway));
+    }
+
+    /// The registered chain id and gateway for a source label (zeros if it isn't registered).
+    function source(string calldata sourceChain) external view returns (uint256 chainId, address gateway) {
+        Source memory s = _sources[keccak256(bytes(sourceChain))];
+        return (s.chainId, s.gateway);
+    }
+
+    function _requireSource(string calldata sourceChain) private view returns (Source memory s) {
+        s = _sources[keccak256(bytes(sourceChain))];
+        if (s.gateway == address(0)) revert UnknownSource();
+    }
+
+    /// Registers (or replaces) a source - a queued change (see `Custodial`), since it decides which
+    /// contract's deposits get paid. Removing one (`gateway` zero) is instant.
+    function setSource(string calldata sourceChain, uint256 chainId, address gateway) external onlyOwner {
+        if (gateway != address(0)) {
+            if (chainId == 0) revert ZeroAmount();
+            _requireQueued();
+        }
+        _sources[keccak256(bytes(sourceChain))] = Source(chainId, gateway);
+        emit SourceSet(sourceChain, chainId, gateway);
     }
 
     /// Votes so far (from current attesters) for `depositId` with parameters `params`.
@@ -437,6 +500,40 @@ contract XonVendingMachine is Custodial {
         if (externalCancelled[depositId]) revert DepositIsCancelled();
         externalCancelled[depositId] = true;
         emit DepositCancelled(depositId);
+    }
+
+    /// The same cancellation, by the attesters instead of the owner: a vote that `depositId` can't
+    /// be paid (its minimum can't be met, its beneficiary can't receive XON) and whether its refund
+    /// keeps the gateway's fee. Once `attestationThreshold` attesters agree on both, the deposit is
+    /// cancelled here - and only then do attesters sign its refund (`publishRefundSignature`).
+    function attestExternalCancel(bytes32 depositId, bool chargeFee) external whenNotPaused {
+        if (!isAttester[msg.sender]) revert NotAttester();
+        if (externalSettledDeposits[depositId]) revert AlreadyExternallySettled();
+        if (externalCancelled[depositId]) revert DepositIsCancelled();
+        bytes32 round = _round(depositId);
+        if (_cancelVoted[round][msg.sender]) revert AlreadyAttested();
+        _cancelVoted[round][msg.sender] = true;
+        uint256 votes = ++_cancelVotes[keccak256(abi.encode(round, chargeFee))];
+        emit ExternalCancelAttested(depositId, msg.sender, chargeFee, votes);
+        if (votes >= attestationThreshold) {
+            externalCancelled[depositId] = true;
+            cancelChargesFee[depositId] = chargeFee;
+            emit DepositCancelled(depositId);
+        }
+    }
+
+    function hasVotedCancel(bytes32 depositId, address attester) external view returns (bool) {
+        return _cancelVoted[_round(depositId)][attester];
+    }
+
+    /// Publishes an attester's signature for the refund of a deposit that is already cancelled
+    /// here, so it can be collected from this contract's events and submitted to the gateway's
+    /// `refundAttested`. Only after the cancellation: a signature that existed before it could
+    /// refund a deposit that then gets paid. The gateway checks the signature itself.
+    function publishRefundSignature(bytes32 depositId, bytes calldata signature) external {
+        if (!isAttester[msg.sender]) revert NotAttester();
+        if (!externalCancelled[depositId]) revert NotCancelled();
+        emit RefundSigned(depositId, msg.sender, signature);
     }
 
     /// The native counterpart of `cancelExternalDeposit`, for a direct-transfer deposit that will be

@@ -63,6 +63,10 @@ contract XonVendingMachineSwapTest is Test {
     function setUp() public {
         usdt = new BurnableMockUSDT();
         vending = new XonVendingMachine(address(usdt), owner, RATE, relayer, owner, owner);
+        vm.startPrank(owner);
+        vending.setSource("ethereum", 1, address(0xE7));
+        vending.setSource("assethub", 420420419, address(0xA7));
+        vm.stopPrank();
 
         vm.etch(XcmSwap.XCM_PRECOMPILE, address(new MockXcmPrecompile()).code);
         xcm = MockXcmPrecompile(XcmSwap.XCM_PRECOMPILE);
@@ -257,10 +261,10 @@ contract XonVendingMachineSwapTest is Test {
         vm.deal(address(vending), 100 ether);
         if (!vending.hasAttested(DEPOSIT, relayer)) {
             vm.prank(relayer);
-            vending.attestExternalPurchase(buyer, 2 * ONE_USDT, "ethereum", DEPOSIT);
+            vending.attestExternalPurchase(buyer, 2 * ONE_USDT, 1, "ethereum", DEPOSIT);
         }
         vm.prank(relayer);
-        vending.settleExternalPurchase(buyer, 2 * ONE_USDT, "ethereum", DEPOSIT);
+        vending.settleExternalPurchase(buyer, 2 * ONE_USDT, 1, "ethereum", DEPOSIT);
 
         vm.prank(relayer);
         vm.expectRevert(XonVendingMachine.AlreadyExternallySettled.selector);

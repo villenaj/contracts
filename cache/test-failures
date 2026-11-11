@@ -1,1 +1,1 @@
-{"version":1,"failures":[{"contract":"test/LoopholeFixes.t.sol:LoopholeFixesTest","test":"test_addressLimit_oneBuyerCantTakeEveryonesAllowance"}]}
+{"version":1,"failures":[{"contract":"test/OpenFlaws.t.sol:OpenFlawsTest","test":"test_refundAttested_needsAQuorumOfDistinctAttesters_forExactlyTheseTerms"}]}

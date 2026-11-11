@@ -26,6 +26,10 @@ contract CustodyHardeningTest is Test {
         usdt = new MockUSDT();
         gateway = new EthUsdtGateway(address(usdt), owner, owner, owner);
         vending = new XonVendingMachine(address(usdt), owner, 0.2 ether, makeAddr("relayer"), owner, owner);
+        vm.startPrank(owner);
+        vending.setSource("ethereum", 1, address(0xE7));
+        vending.setSource("assethub", 420420419, address(0xA7));
+        vm.stopPrank();
         for (uint256 i = 0; i < 2; i++) {
             address who = i == 0 ? alice : bob;
             usdt.mint(who, 100e6);
@@ -34,10 +38,19 @@ contract CustodyHardeningTest is Test {
         }
     }
 
+    function _release(uint256 nonce, address who, uint256 amount) internal {
+        uint256[] memory nonces = new uint256[](1);
+        address[] memory depositors = new address[](1);
+        uint256[] memory amounts = new uint256[](1);
+        (nonces[0], depositors[0], amounts[0]) = (nonce, who, amount);
+        vm.prank(owner);
+        gateway.release(nonces, depositors, amounts);
+    }
+
     function _deposit(address who, uint256 amount) internal returns (uint256 nonce) {
         nonce = gateway.depositNonce();
         vm.prank(who);
-        gateway.deposit(amount, beneficiary);
+        gateway.deposit(amount, beneficiary, 1);
     }
 
     // --- two-step ownership --------------------------------------------------------------------
@@ -100,6 +113,7 @@ contract CustodyHardeningTest is Test {
 
     function test_withdrawOnlyPaysTheTreasury() public {
         _deposit(alice, 10e6);
+        _release(0, alice, 10e6); // paid on Xode: no longer owed
         vm.prank(owner);
         gateway.withdraw(4e6);
         assertEq(usdt.balanceOf(owner), 4e6, "the treasury (the deploying owner, by default)");
@@ -120,6 +134,7 @@ contract CustodyHardeningTest is Test {
 
         vm.warp(block.timestamp + 1);
         gateway.applyTreasury();
+        usdt.mint(address(gateway), 10e6); // proceeds that aren't owed to anyone
         gateway.withdraw(10e6);
         vm.stopPrank();
         assertEq(gateway.treasury(), coldTreasury);
@@ -134,6 +149,7 @@ contract CustodyHardeningTest is Test {
         _deposit(alice, 50e6);
 
         // The owner key is stolen. The attacker can't withdraw to themselves...
+        usdt.mint(address(gateway), 2e6); // proceeds that aren't owed to anyone
         vm.startPrank(owner);
         gateway.withdraw(1e6); // ...only to the treasury
         assertEq(usdt.balanceOf(attacker), 0);
@@ -232,6 +248,10 @@ contract CustodyHardeningTest is Test {
 
     function _vendingWithSeparateRoles() internal returns (XonVendingMachine v) {
         v = new XonVendingMachine(address(usdt), owner, 0.2 ether, makeAddr("relayer"), coldTreasury, guardian);
+        vm.startPrank(owner);
+        v.setSource("ethereum", 1, address(0xE7));
+        v.setSource("assethub", 420420419, address(0xA7));
+        vm.stopPrank();
         vm.deal(address(v), 100 ether);
         usdt.mint(owner, 50e6);
         vm.startPrank(owner);
@@ -267,7 +287,7 @@ contract CustodyHardeningTest is Test {
         assertTrue(v.paused(), "payouts stopped");
         vm.prank(makeAddr("relayer"));
         vm.expectRevert(Custodial.IsPaused.selector);
-        v.settleExternalPurchase(beneficiary, 1e6, "ethereum", keccak256("x"));
+        v.settleExternalPurchase(beneficiary, 1e6, 1, "ethereum", keccak256("x"));
 
         vm.warp(block.timestamp + 3 days);
         vm.prank(owner);
