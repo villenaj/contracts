@@ -261,6 +261,61 @@ contract LoopholeFixesTest is Test {
         vending.cancelExternalDeposit(keccak256("other"));
     }
 
+    function test_cancelNative_refundLeavesNoPhantomBalance() public {
+        bytes32 tx1 = keccak256("xode:0x111");
+        // Alice transfers 10 USDT straight in; it's held (say, over her limit) and refunded instead.
+        vm.prank(alice);
+        usdt.transfer(address(vending), 10 * USDT);
+
+        vm.prank(owner);
+        vending.cancelNativeDeposit(tx1, 10 * USDT);
+        assertTrue(vending.nativeCancelled(tx1));
+        assertEq(vending.accountedUsdt(), 10 * USDT);
+
+        // The refund leaves via the treasury, and nothing unaccounted remains to settle against.
+        vm.prank(owner);
+        vending.withdrawUsdt(10 * USDT);
+        assertEq(usdt.balanceOf(treasury), 10 * USDT);
+        assertEq(usdt.balanceOf(address(vending)), vending.accountedUsdt());
+
+        vm.prank(relayerA);
+        vm.expectRevert(XonVendingMachine.DepositIsCancelled.selector);
+        vending.settlePurchase(alice, 10 * USDT, tx1);
+        // Nor can the relayer pin it on another id: there's no unaccounted USDT left.
+        vm.prank(relayerA);
+        vm.expectRevert(XonVendingMachine.UnverifiedDeposit.selector);
+        vending.settlePurchase(attacker, 10 * USDT, keccak256("made-up"));
+    }
+
+    function test_cancelNative_onlyUnpaidUnaccountedOwnerOnly() public {
+        bytes32 tx1 = keccak256("xode:0x111");
+        vm.prank(alice);
+        usdt.transfer(address(vending), 10 * USDT);
+
+        vm.prank(guardian);
+        vm.expectRevert(Custodial.NotOwner.selector);
+        vending.cancelNativeDeposit(tx1, 10 * USDT);
+        // More than is unaccounted.
+        vm.prank(owner);
+        vm.expectRevert(XonVendingMachine.UnverifiedDeposit.selector);
+        vending.cancelNativeDeposit(tx1, 11 * USDT);
+
+        vm.prank(relayerA);
+        vending.settlePurchase(alice, 10 * USDT, tx1);
+        vm.prank(owner);
+        vm.expectRevert(XonVendingMachine.AlreadySettled.selector);
+        vending.cancelNativeDeposit(tx1, 10 * USDT);
+
+        bytes32 tx2 = keccak256("xode:0x222");
+        vm.prank(alice);
+        usdt.transfer(address(vending), 5 * USDT);
+        vm.startPrank(owner);
+        vending.cancelNativeDeposit(tx2, 5 * USDT);
+        vm.expectRevert(XonVendingMachine.DepositIsCancelled.selector);
+        vending.cancelNativeDeposit(tx2, 5 * USDT);
+        vm.stopPrank();
+    }
+
     // --- #4 / #5 / blacklist: the gateway ----------------------------------------------------------
 
     function test_gateway_minimumDeposit() public {

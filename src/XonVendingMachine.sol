@@ -107,6 +107,8 @@ contract XonVendingMachine is Custodial {
     mapping(bytes32 => uint256) private _votes;
     /// Deposits the owner cancelled before refunding them on their source chain.
     mapping(bytes32 => bool) public externalCancelled;
+    /// Xode-native deposits the owner cancelled, to refund them from the treasury instead of paying XON.
+    mapping(bytes32 => bool) public nativeCancelled;
 
     /// Per buyer / beneficiary, across all paths, in raw USDT units; 0 = no per-address limit.
     uint256 public maxPerAddressPerDay;
@@ -157,6 +159,7 @@ contract XonVendingMachine is Custodial {
     event AttesterRemoved(address indexed attester);
     event AttestationThresholdSet(uint256 threshold);
     event DepositCancelled(bytes32 indexed depositId);
+    event NativeDepositCancelled(bytes32 indexed depositTxHash, uint256 usdtAmount);
     event AddressLimitSet(uint256 maxPerDay);
     event FixedRatePauseSet(bool byOwner, bool byKeeper);
 
@@ -263,6 +266,7 @@ contract XonVendingMachine is Custodial {
         if (buyer == address(0)) revert ZeroAddress();
         if (usdtAmount == 0) revert ZeroAmount();
         if (settledDeposits[depositTxHash]) revert AlreadySettled();
+        if (nativeCancelled[depositTxHash]) revert DepositIsCancelled();
         if (accountedUsdt + usdtAmount > usdt.balanceOf(address(this))) revert UnverifiedDeposit();
         _useNativeAllowance(usdtAmount);
         _useAddressAllowance(buyer, usdtAmount);
@@ -433,6 +437,23 @@ contract XonVendingMachine is Custodial {
         if (externalCancelled[depositId]) revert DepositIsCancelled();
         externalCancelled[depositId] = true;
         emit DepositCancelled(depositId);
+    }
+
+    /// The native counterpart of `cancelExternalDeposit`, for a direct-transfer deposit that will be
+    /// refunded rather than paid (held or skipped by the relayer). Marks it never to be settled and
+    /// counts its USDT in `accountedUsdt`, so `withdrawUsdt` can move it to the treasury for the
+    /// refund. Without this, withdrawing it would leave the "unaccounted" balance it was backed by in
+    /// place (withdrawUsdt draws `accountedUsdt` down first), and `settlePurchase` could still pay
+    /// the refunded deposit - or, with a stolen relayer key, anyone - against USDT that already left.
+    /// `usdtAmount` must still be unaccounted, like a `settlePurchase` of it would need.
+    function cancelNativeDeposit(bytes32 depositTxHash, uint256 usdtAmount) external onlyOwner {
+        if (usdtAmount == 0) revert ZeroAmount();
+        if (settledDeposits[depositTxHash]) revert AlreadySettled();
+        if (nativeCancelled[depositTxHash]) revert DepositIsCancelled();
+        if (accountedUsdt + usdtAmount > usdt.balanceOf(address(this))) revert UnverifiedDeposit();
+        nativeCancelled[depositTxHash] = true;
+        accountedUsdt += usdtAmount;
+        emit NativeDepositCancelled(depositTxHash, usdtAmount);
     }
 
     /// Adding an attester is a queued change (see `Custodial`).
